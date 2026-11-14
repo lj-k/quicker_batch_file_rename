@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.06.3] - 2026-11-14
+
+### Fixed
+
+- 保存预设时直接通过 `winContext.Context.SetVarValue` 写回动作变量，不再依赖自定义窗口后的变量赋值步骤。
+- 反射查找 `GetVarValue/SetVarValue` 时同时检查运行时类型与实现接口，兼容 Quicker 上下文的显式接口实现。
+- “保存为状态”把嵌套词典读回为 JSON 文本时，`PrimePresetVariables` 会先解析并还原为词典，避免误判为“没有已保存的预设”。
+- 扩展名预设同样支持 JSON 文本状态还原。
+
+### Added
+
+- 核心新增 `TryParseJson` 轻量解析器（对象、数组、字符串、数字、布尔、null、转义与 Unicode）。
+- 新增 15 项预设状态 JSON 解析测试，核心测试总数 213 项。
+
+### Verified
+
+- 核心测试 213 项通过，0 项失败。
+- 辅助 C# 按 C# 5 / .NET Framework 4.8 参考程序集编译通过。
+- 两套 release 重新生成；XAML 解析、控件命名与版本一致性校验通过。
+
 ## [0.06.2] - 2026-11-14
 
 ### Fixed

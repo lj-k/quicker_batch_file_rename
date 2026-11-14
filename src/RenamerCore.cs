@@ -10,7 +10,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.2
+// 版本：0.06.3
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -1924,4 +1924,223 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
         NormalizeConfig(config);
     }
     return applied;
+}
+
+// Quicker“保存为状态”会把嵌套词典序列化成JSON文本；启动时用以下解析器还原。
+public static bool TryParseJson(string text, out object value)
+{
+    value = null;
+    if (text == null)
+        return false;
+
+    string trimmed = text.Trim();
+    if (trimmed.Length == 0)
+        return false;
+
+    int index = 0;
+    try
+    {
+        value = ParseJsonValue(trimmed, ref index);
+        SkipJsonWhitespace(trimmed, ref index);
+        return index == trimmed.Length;
+    }
+    catch
+    {
+        value = null;
+        return false;
+    }
+}
+
+private static object ParseJsonValue(string text, ref int index)
+{
+    SkipJsonWhitespace(text, ref index);
+    if (index >= text.Length)
+        throw new FormatException("JSON意外结束。");
+
+    char ch = text[index];
+    if (ch == '{')
+        return ParseJsonObject(text, ref index);
+    if (ch == '[')
+        return ParseJsonArray(text, ref index);
+    if (ch == '"')
+        return ParseJsonString(text, ref index);
+    if (ch == 't')
+    {
+        ExpectJsonLiteral(text, ref index, "true");
+        return true;
+    }
+    if (ch == 'f')
+    {
+        ExpectJsonLiteral(text, ref index, "false");
+        return false;
+    }
+    if (ch == 'n')
+    {
+        ExpectJsonLiteral(text, ref index, "null");
+        return null;
+    }
+    return ParseJsonNumber(text, ref index);
+}
+
+private static Dictionary<string, object> ParseJsonObject(string text, ref int index)
+{
+    Dictionary<string, object> result =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    index++;
+
+    SkipJsonWhitespace(text, ref index);
+    if (index < text.Length && text[index] == '}')
+    {
+        index++;
+        return result;
+    }
+
+    while (true)
+    {
+        SkipJsonWhitespace(text, ref index);
+        if (index >= text.Length || text[index] != '"')
+            throw new FormatException("JSON对象键必须是字符串。");
+
+        string key = ParseJsonString(text, ref index);
+        SkipJsonWhitespace(text, ref index);
+        if (index >= text.Length || text[index] != ':')
+            throw new FormatException("JSON对象缺少冒号。");
+
+        index++;
+        result[key] = ParseJsonValue(text, ref index);
+        SkipJsonWhitespace(text, ref index);
+        if (index >= text.Length)
+            throw new FormatException("JSON对象未结束。");
+
+        if (text[index] == ',')
+        {
+            index++;
+            continue;
+        }
+        if (text[index] == '}')
+        {
+            index++;
+            return result;
+        }
+        throw new FormatException("JSON对象分隔符无效。");
+    }
+}
+
+private static List<object> ParseJsonArray(string text, ref int index)
+{
+    List<object> result = new List<object>();
+    index++;
+
+    SkipJsonWhitespace(text, ref index);
+    if (index < text.Length && text[index] == ']')
+    {
+        index++;
+        return result;
+    }
+
+    while (true)
+    {
+        result.Add(ParseJsonValue(text, ref index));
+        SkipJsonWhitespace(text, ref index);
+        if (index >= text.Length)
+            throw new FormatException("JSON数组未结束。");
+
+        if (text[index] == ',')
+        {
+            index++;
+            continue;
+        }
+        if (text[index] == ']')
+        {
+            index++;
+            return result;
+        }
+        throw new FormatException("JSON数组分隔符无效。");
+    }
+}
+
+private static string ParseJsonString(string text, ref int index)
+{
+    StringBuilder builder = new StringBuilder();
+    index++;
+
+    while (index < text.Length)
+    {
+        char ch = text[index++];
+        if (ch == '"')
+            return builder.ToString();
+
+        if (ch != '\\')
+        {
+            builder.Append(ch);
+            continue;
+        }
+
+        if (index >= text.Length)
+            throw new FormatException("JSON字符串转义不完整。");
+
+        char escape = text[index++];
+        switch (escape)
+        {
+            case '"': builder.Append('"'); break;
+            case '\\': builder.Append('\\'); break;
+            case '/': builder.Append('/'); break;
+            case 'b': builder.Append('\b'); break;
+            case 'f': builder.Append('\f'); break;
+            case 'n': builder.Append('\n'); break;
+            case 'r': builder.Append('\r'); break;
+            case 't': builder.Append('\t'); break;
+            case 'u':
+                if (index + 4 > text.Length)
+                    throw new FormatException("JSON Unicode转义不完整。");
+                int code;
+                if (!int.TryParse(text.Substring(index, 4), NumberStyles.HexNumber,
+                    CultureInfo.InvariantCulture, out code))
+                    throw new FormatException("JSON Unicode转义无效。");
+                builder.Append((char)code);
+                index += 4;
+                break;
+            default:
+                throw new FormatException("JSON字符串转义无效。");
+        }
+    }
+    throw new FormatException("JSON字符串未结束。");
+}
+
+private static object ParseJsonNumber(string text, ref int index)
+{
+    int start = index;
+    if (index < text.Length && (text[index] == '-' || text[index] == '+'))
+        index++;
+
+    while (index < text.Length)
+    {
+        char ch = text[index];
+        if (char.IsDigit(ch) || ch == '.' || ch == 'e' || ch == 'E' || ch == '+' || ch == '-')
+        {
+            index++;
+            continue;
+        }
+        break;
+    }
+
+    string token = text.Substring(start, index - start);
+    double number;
+    if (!double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out number))
+        throw new FormatException("JSON数字无效。");
+    return number;
+}
+
+private static void ExpectJsonLiteral(string text, ref int index, string literal)
+{
+    if (index + literal.Length > text.Length ||
+        string.CompareOrdinal(text, index, literal, 0, literal.Length) != 0)
+        throw new FormatException("JSON字面量无效。");
+    index += literal.Length;
+}
+
+private static void SkipJsonWhitespace(string text, ref int index)
+{
+    while (index < text.Length && char.IsWhiteSpace(text[index]))
+        index++;
 }

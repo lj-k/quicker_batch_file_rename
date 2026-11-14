@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.2
+// 版本：0.06.3
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2393,6 +2393,31 @@ private static void PrimePresetVariables()
         if (TryGetActionVariable("扩展名预设", out extValue) && extValue != null)
             _data["extensionPresets"] = extValue;
     }
+
+    // Quicker“保存为状态”会把嵌套词典序列化成JSON文本，下次启动时变量可能是string。
+    // 在窗口数据层先还原成词典，后续载入、保存和关闭写回都使用词典对象。
+    NormalizePresetVariable("preset");
+    NormalizePresetVariable("extensionPresets");
+}
+
+private static void NormalizePresetVariable(string key)
+{
+    if (_data == null || key == null)
+        return;
+
+    object value;
+    if (!_data.TryGetValue(key, out value) || value == null)
+        return;
+    if (value is IDictionary<string, object> || value is IDictionary)
+        return;
+
+    string text = value as string;
+    if (text == null)
+        return;
+
+    IDictionary<string, object> parsed = AsObjectDictionary(text);
+    if (parsed != null)
+        _data[key] = parsed;
 }
 
 private static bool TryGetActionVariable(string variableName, out object value)
@@ -2430,9 +2455,7 @@ private static bool TryGetActionVariable(string variableName, out object value)
 private static bool TryGetVarValue(object target, string variableName, out object value)
 {
     value = null;
-    if (target == null)
-        return false;
-    MethodInfo method = target.GetType().GetMethod("GetVarValue",
+    MethodInfo method = FindVariableMethod(target, "GetVarValue",
         new Type[] { typeof(string) });
     if (method == null)
         return false;
@@ -2440,33 +2463,52 @@ private static bool TryGetVarValue(object target, string variableName, out objec
     return true;
 }
 
+private static MethodInfo FindVariableMethod(object target, string methodName, Type[] parameterTypes)
+{
+    if (target == null || methodName == null)
+        return null;
+
+    Type type = target.GetType();
+    MethodInfo method = type.GetMethod(methodName, parameterTypes);
+    if (method != null)
+        return method;
+
+    // Quicker上下文可能以显式接口实现提供GetVarValue/SetVarValue，
+    // 此时必须从接口上取方法再对实例调用。
+    foreach (Type iface in type.GetInterfaces())
+    {
+        method = iface.GetMethod(methodName, parameterTypes);
+        if (method != null)
+            return method;
+    }
+    return null;
+}
+
 private static void PublishActionVariable(string variableName, object value)
 {
     if (_winContext == null || variableName == null)
         return;
+    // 不同版本可能直接提供 SetVarValue，或通过 Context / GetRootContext 暴露。
+    // 逐级尝试所有可用上下文，避免只写入步骤局部作用域而动作根变量仍是旧值。
+    TryPublishTo(_winContext, variableName, value);
+
     try
     {
-        // 不同版本可能直接提供 SetVarValue，或通过 Context / GetRootContext 暴露。
-        object target = _winContext;
-        if (!TrySetVarValue(target, variableName, value))
-        {
-            PropertyInfo contextProperty = target.GetType().GetProperty("Context");
-            if (contextProperty != null)
-            {
-                object context = contextProperty.GetValue(target, null);
-                if (context != null && TrySetVarValue(context, variableName, value))
-                    return;
+        PropertyInfo contextProperty = _winContext.GetType().GetProperty("Context");
+        if (contextProperty == null)
+            return;
 
-                if (context != null)
-                {
-                    MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
-                    if (rootMethod != null)
-                    {
-                        object root = rootMethod.Invoke(context, null);
-                        TrySetVarValue(root, variableName, value);
-                    }
-                }
-            }
+        object context = contextProperty.GetValue(_winContext, null);
+        if (context == null)
+            return;
+
+        TryPublishTo(context, variableName, value);
+
+        MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
+        if (rootMethod != null)
+        {
+            object root = rootMethod.Invoke(context, null);
+            TryPublishTo(root, variableName, value);
         }
     }
     catch
@@ -2475,14 +2517,55 @@ private static void PublishActionVariable(string variableName, object value)
     }
 }
 
+private static bool TryPublishTo(object target, string variableName, object value)
+{
+    try
+    {
+        return TrySetVarValue(target, variableName, value);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
 private static bool TrySetVarValue(object target, string variableName, object value)
 {
     if (target == null)
         return false;
-    MethodInfo method = target.GetType().GetMethod("SetVarValue",
+
+    MethodInfo method = FindVariableMethod(target, "SetVarValue",
         new Type[] { typeof(string), typeof(object) });
     if (method == null)
+    {
+        // 兼容个别版本使用不同第二参数类型的情况。
+        List<Type> types = new List<Type>();
+        types.Add(target.GetType());
+        types.AddRange(target.GetType().GetInterfaces());
+        foreach (Type type in types)
+        {
+            foreach (MethodInfo candidate in type.GetMethods())
+            {
+                if (candidate.Name != "SetVarValue")
+                    continue;
+                ParameterInfo[] parameters = candidate.GetParameters();
+                if (parameters.Length != 2)
+                    continue;
+                if (parameters[0].ParameterType != typeof(string))
+                    continue;
+                if (!parameters[1].ParameterType.IsInstanceOfType(value) &&
+                    parameters[1].ParameterType != typeof(object))
+                    continue;
+                method = candidate;
+                break;
+            }
+            if (method != null)
+                break;
+        }
+    }
+    if (method == null)
         return false;
+
     method.Invoke(target, new object[] { variableName, value });
     return true;
 }
@@ -2497,14 +2580,24 @@ private static IDictionary<string, object> AsObjectDictionary(object value)
         return generic;
 
     IDictionary dictionary = value as IDictionary;
-    if (dictionary == null)
+    if (dictionary != null)
+    {
+        Dictionary<string, object> converted =
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        foreach (DictionaryEntry entry in dictionary)
+            converted[Convert.ToString(entry.Key, CultureInfo.InvariantCulture)] = entry.Value;
+        return converted;
+    }
+
+    // “保存为状态”的嵌套词典可能以JSON文本读回，这里统一还原为词典。
+    string text = value as string;
+    if (text == null)
         return null;
 
-    Dictionary<string, object> converted =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    foreach (DictionaryEntry entry in dictionary)
-        converted[Convert.ToString(entry.Key, CultureInfo.InvariantCulture)] = entry.Value;
-    return converted;
+    object parsed;
+    if (!TryParseJson(text, out parsed))
+        return null;
+    return AsObjectDictionary(parsed);
 }
 
 private static Dictionary<string, object> CopyObjectDictionary(IDictionary<string, object> source)

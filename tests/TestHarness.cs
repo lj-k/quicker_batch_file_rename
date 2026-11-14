@@ -531,6 +531,57 @@ public static class TestHarness
             "preset: explicit generic template is preserved in rename mode");
     }
 
+    private static void TestPresetJsonState()
+    {
+        string presetJson = "{\"presetVersion\":\"0.05\",\"presets\":{\"图片-截屏\":{\"presetVersion\":\"0.05\",\"rootMode\":\"current\",\"rootPath\":\"\",\"startYear\":\"2000\",\"filterExtensions\":\"\",\"filterMode\":\"skip\",\"dateSource\":\"filename\",\"dateFallbackOrder\":\"filename,exif,modified,created,empty\",\"dateFallbackCustomText\":\"\",\"realTimePreview\":\"true\",\"execParallel\":\"2\",\"execVerify\":\"true\",\"checksumAlgorithm\":\"CRC32\",\"checksumDigits\":\"8\",\"checksumPrefix\":\"[\",\"checksumSuffix\":\"]\",\"template\":\"【根路径】/【日期yyyy】.【日期mm】/图片/截屏/【源文件名】-【校验码】.【扩展名】\"}}}";
+
+        object parsed;
+        Check(CoreUnderTest.TryParseJson(presetJson, out parsed), "preset json: parse nested state");
+        IDictionary<string, object> root = parsed as IDictionary<string, object>;
+        Check(root != null, "preset json: root dictionary");
+
+        IDictionary<string, object> presetConfig = null;
+        if (root != null)
+        {
+            object presetsObject;
+            Check(root.TryGetValue("presets", out presetsObject), "preset json: presets key");
+            IDictionary<string, object> presets = presetsObject as IDictionary<string, object>;
+            Check(presets != null && presets.ContainsKey("图片-截屏"), "preset json: preset name");
+            if (presets != null && presets.ContainsKey("图片-截屏"))
+                presetConfig = presets["图片-截屏"] as IDictionary<string, object>;
+            Check(presetConfig != null, "preset json: config dictionary");
+        }
+
+        if (presetConfig != null)
+        {
+            CheckEqual("CRC32", Convert.ToString(presetConfig["checksumAlgorithm"]), "preset json: checksum");
+            CheckEqual("【根路径】/【日期yyyy】.【日期mm】/图片/截屏/【源文件名】-【校验码】.【扩展名】",
+                Convert.ToString(presetConfig["template"]), "preset json: template");
+
+            Dictionary<string, string> loaded = CoreUnderTest.CreateDefaultConfig(2000);
+            Check(CoreUnderTest.ApplyPresetDictionary(presetConfig, loaded), "preset json: apply parsed config");
+            CheckEqual("CRC32", loaded["checksumAlgorithm"], "preset json: applied checksum");
+        }
+
+        object escaped;
+        Check(CoreUnderTest.TryParseJson("{\"name\":\"a\\\"b\\\\c\\u56FE\"}", out escaped),
+            "preset json: parse escapes");
+        IDictionary<string, object> escapedDictionary = escaped as IDictionary<string, object>;
+        Check(escapedDictionary != null &&
+            Convert.ToString(escapedDictionary["name"]) == "a\"b\\c图",
+            "preset json: escape values");
+
+        object arrayValue;
+        Check(CoreUnderTest.TryParseJson("[1,2,\"x\",true,null]", out arrayValue) &&
+            arrayValue is List<object> && ((List<object>)arrayValue).Count == 5,
+            "preset json: array values");
+
+        object invalid;
+        Check(!CoreUnderTest.TryParseJson("{\"presets\":", out invalid), "preset json: reject truncated");
+        Check(!CoreUnderTest.TryParseJson("", out invalid), "preset json: reject empty");
+        Check(!CoreUnderTest.TryParseJson("not json", out invalid), "preset json: reject text");
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -543,6 +594,7 @@ public static class TestHarness
         TestFilter();
         TestTransferEngine();
         TestPreset();
+        TestPresetJsonState();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
         return _failed == 0 ? 0 : 1;
