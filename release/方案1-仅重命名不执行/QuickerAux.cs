@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.1
+// 版本：0.06.2
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -30,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.1
+// 版本：0.06.2
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -1948,7 +1948,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.1
+// 版本：0.06.2
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2063,10 +2063,8 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
     {
         if (!dataContext.ContainsKey("files") || dataContext["files"] == null)
             dataContext["files"] = new List<object>();
-        if (!dataContext.ContainsKey("preset") || dataContext["preset"] == null)
-            dataContext["preset"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-        if (!dataContext.ContainsKey("extensionPresets") || dataContext["extensionPresets"] == null)
-            dataContext["extensionPresets"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        // preset/extensionPresets 由数据映射传入；缺失时在 OnWindowLoaded 尝试读取动作变量，
+        // 不在这里提前写入空词典，避免掩盖“未配置映射”的问题。
         object startYearValue;
         if (!dataContext.TryGetValue("startYear", out startYearValue) || startYearValue == null)
             dataContext["startYear"] = 2000;
@@ -2088,6 +2086,8 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
     _window = win;
     _data = dataContext;
     _winContext = winContext;
+
+    PrimePresetVariables();
 
     FindControls(win);
     ResetRuntimeState();
@@ -4298,6 +4298,70 @@ private static void SavePresetStore(Dictionary<string, Dictionary<string, object
     PublishActionVariable("批量重命名器预设", root);
 }
 
+private static void PrimePresetVariables()
+{
+    if (_data == null)
+        return;
+
+    if (!_data.ContainsKey("preset") || _data["preset"] == null)
+    {
+        object presetValue;
+        if (TryGetActionVariable("批量重命名器预设", out presetValue) && presetValue != null)
+            _data["preset"] = presetValue;
+    }
+    if (!_data.ContainsKey("extensionPresets") || _data["extensionPresets"] == null)
+    {
+        object extValue;
+        if (TryGetActionVariable("扩展名预设", out extValue) && extValue != null)
+            _data["extensionPresets"] = extValue;
+    }
+}
+
+private static bool TryGetActionVariable(string variableName, out object value)
+{
+    value = null;
+    if (_winContext == null || variableName == null)
+        return false;
+    try
+    {
+        object target = _winContext;
+        if (TryGetVarValue(target, variableName, out value))
+            return true;
+
+        PropertyInfo contextProperty = target.GetType().GetProperty("Context");
+        if (contextProperty == null)
+            return false;
+        object context = contextProperty.GetValue(target, null);
+        if (context == null)
+            return false;
+        if (TryGetVarValue(context, variableName, out value))
+            return true;
+
+        MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
+        if (rootMethod == null)
+            return false;
+        object root = rootMethod.Invoke(context, null);
+        return TryGetVarValue(root, variableName, out value);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+private static bool TryGetVarValue(object target, string variableName, out object value)
+{
+    value = null;
+    if (target == null)
+        return false;
+    MethodInfo method = target.GetType().GetMethod("GetVarValue",
+        new Type[] { typeof(string) });
+    if (method == null)
+        return false;
+    value = method.Invoke(target, new object[] { variableName });
+    return true;
+}
+
 private static void PublishActionVariable(string variableName, object value)
 {
     if (_winContext == null || variableName == null)
@@ -5177,12 +5241,16 @@ private static void EnsureDefaultPreset()
 {
     if (_data == null)
         return;
+
     Dictionary<string, Dictionary<string, object>> store = LoadPresetStore();
     if (store.Count == 0)
-    {
         store["默认"] = BuildPresetDictionary(_config);
-        SavePresetStore(store);
-    }
+    // 即使已有多套预设，也在完成/执行前回写一次，确保数据映射或动作变量拿到最新结构。
+    SavePresetStore(store);
+
+    Dictionary<string, string> extensionStore = LoadExtensionPresetStore();
+    if (extensionStore.Count > 0)
+        SaveExtensionPresetStore(extensionStore);
 }
 
 private static void Window_Closing(object sender, CancelEventArgs e)

@@ -75,9 +75,11 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.1", "deployed code version is 0.06.1")
+check(dist_text.splitlines()[1] == "// 版本：0.06.2", "deployed code version is 0.06.2")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
+check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
+check("PrimePresetVariables" in dist_text, "deployed code primes preset variables")
 check("ExecuteOneFile" in dist_text, "deployed code contains execution worker")
 check("CopyFileAdaptive" in dist_text, "deployed code contains adaptive transfer engine")
 check("DeliveryMode" in dist_text, "deployed code contains delivery mode")
@@ -85,14 +87,14 @@ check("Finish_Click" in dist_text, "deployed code contains finish handler")
 check('"actions"' in dist_text, "deployed code outputs action list")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.1" in core_text, "core source version is 0.06.1")
+check("// 版本：0.06.2" in core_text, "core source version is 0.06.2")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("ShouldSkipByFilter" in core_text, "core contains filter decision")
 check("ResolveAction" in core_text, "core contains action resolution")
 check("CopyFileWithRetry" in core_text, "core contains copy retry engine")
 check("SelectCopyBufferSizeForDrive" in core_text, "core contains drive buffer profile")
-check('// 版本：0.06.1' in aux_text, "aux source version is 0.06.1")
-check("XAML 版本：0.06.1" in xaml_text, "XAML version is 0.06.1")
+check('// 版本：0.06.2' in aux_text, "aux source version is 0.06.2")
+check("XAML 版本：0.06.2" in xaml_text, "XAML version is 0.06.2")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -115,14 +117,15 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check(req_text.count("0.0.9") == 1 and "> 版本：0.0.9" in req_text, "requirements doc version 0.0.9 is unique")
+check(req_text.count("0.0.10") == 1 and "> 版本：0.0.10" in req_text, "requirements doc version 0.0.10 is unique")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
+check("预设变量未持久化排查" in req_text, "requirements includes preset persistence")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.1"),
-    ("doc/测试报告.md", "0.06.1"),
+    ("doc/开发说明.md", "0.06.2"),
+    ("doc/测试报告.md", "0.06.2"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -134,7 +137,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.1]" in changelog_text, "CHANGELOG has 0.06.1 entry")
+    check("[0.06.2]" in changelog_text, "CHANGELOG has 0.06.2 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -145,7 +148,7 @@ check("共享代码，一同开发、更新和交付" in agents,
       "AGENTS.md keeps shared delivery rule")
 
 inputs = sorted((ROOT / "userinput").glob("*.md"))
-check(len(inputs) >= 10, "userinput contains at least 10 records")
+check(len(inputs) >= 11, "userinput contains at least 11 records")
 
 release = ROOT / "release"
 s1 = release / "方案1-仅重命名不执行"
@@ -153,8 +156,8 @@ s2 = release / "方案2-执行不输出列表"
 for folder in [s1, s2]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.1",
-          str(folder.name) + " Aux version 0.06.1")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.2",
+          str(folder.name) + " Aux version 0.06.2")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

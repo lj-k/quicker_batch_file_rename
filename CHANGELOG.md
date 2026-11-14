@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.06.2] - 2026-11-14
+
+### Fixed
+
+- 窗口启动时显式读取两个预设变量：`OnWindowLoaded` 调用 `PrimePresetVariables`，优先使用数据映射，缺失时尝试 `GetVarValue` 读取【批量重命名器预设】/【扩展名预设】。
+- 点击【完成】或【执行】时回写当前预设库；扩展名预设库非空时一并回写，避免只保存在窗口内存中。
+- 明确文档：Quicker 变量“保存为状态”只负责持久化，仍需配置 `preset:{批量重命名器预设}` 与 `extensionPresets:{扩展名预设}`。
+
+### Verified
+
+- 核心测试 198 项通过；辅助 C# 编译通过；交付校验通过。
+- 启动读取/回写逻辑为代码审查项，Quicker 实机的 `GetVarValue/SetVarValue` 与数据映射时机需人工验证。
+
 ## [0.06.1] - 2026-11-14
 
 ### Changed
