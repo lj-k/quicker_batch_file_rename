@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.14
+// 版本：0.06.15
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.14
+// 版本：0.06.15
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -2827,7 +2827,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.14
+// 版本：0.06.15
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -3267,7 +3267,11 @@ private static void AttachEvents(Window win)
     _fallback5Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallbackCustomText.TextChanged += FallbackCustomText_TextChanged;
     if (_presetListBox != null)
+    {
         _presetListBox.SelectionChanged += PresetListBox_SelectionChanged;
+        _presetListBox.PreviewMouseLeftButtonDown += PresetListBox_PreviewMouseDown;
+        _presetListBox.AddHandler(Button.ClickEvent, new RoutedEventHandler(PresetItemButton_Click));
+    }
     _digitsText.TextChanged += DigitsText_TextChanged;
     _digitsText.LostFocus += DigitsText_LostFocus;
     _prefixText.TextChanged += PrefixText_TextChanged;
@@ -3348,7 +3352,7 @@ private static void AttachToolTips()
     SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
     SetTip(_realTimeCheck, "实时刷新开关。\n开启：配置变更后立即重算目标路径（文本输入约250ms防抖）。\n关闭：配置变更只更新配置/日期数据，目标路径保持旧值；需点击【预览】刷新，预览过期时【生成输出】禁用。");
     SetTip(_previewButton, "按当前配置重新计算目标路径，并启动必要的校验码计算。\n用于实时刷新关闭后的手动刷新，也可主动重新预览。");
-    SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n若词典是旧版单预设，会显示为“默认”。");
+    SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n每项右侧的🖊用于重命名该预设，❌用于删除该预设；删除不可撤销。\n若词典是旧版单预设，会显示为“默认”。");
     SetTip(_savePresetButton, "保存当前全部配置为命名预设。\n会要求输入预设名称；若同名预设已存在，会列出变更项目并询问是否覆盖。\n预设保存在动作词典【批量重命名器预设】中。");
     SetTip(_algorithmCombo, "校验算法。\n最高16进制位数：CRC32=8、BLAKE3=64、MD5=32、SHA-256=64。\n切换算法时，若原位数是旧算法最高值，会自动改为新算法最高值。");
     SetTip(_digitsText, "保留的16进制位数，1~算法最高值。\n截取取高位；等于最高值时不显示“_位数”。\n位数越短，重名概率越高。");
@@ -5908,6 +5912,14 @@ private static void LoadPreset_Click(object sender, RoutedEventArgs e)
         return;
     }
 
+    PopulatePresetList(store);
+    OpenPresetPopup();
+}
+
+private static int PopulatePresetList(Dictionary<string, Dictionary<string, object>> store)
+{
+    if (_presetListBox == null)
+        return 0;
     List<string> names = new List<string>(store.Keys);
     names.Sort(StringComparer.OrdinalIgnoreCase);
 
@@ -5917,11 +5929,163 @@ private static void LoadPreset_Click(object sender, RoutedEventArgs e)
         _presetListBox.Items.Add(names[i]);
     _presetListBox.SelectedItem = null;
     _suppressPresetSelection = false;
+    return names.Count;
+}
 
+private static void OpenPresetPopup()
+{
+    if (_presetPopup == null)
+        return;
     if (_loadPresetButton != null)
         _presetPopup.PlacementTarget = _loadPresetButton;
     _presetPopup.Placement = PlacementMode.Bottom;
     _presetPopup.IsOpen = true;
+}
+
+// 重命名/删除后刷新列表；仍有预设时重新打开下拉框，否则关闭。
+private static void RefreshPresetPopupAfterEdit()
+{
+    if (_presetPopup == null || _presetListBox == null)
+        return;
+    int count = PopulatePresetList(LoadPresetStore());
+    if (count > 0)
+        OpenPresetPopup();
+    else
+        _presetPopup.IsOpen = false;
+}
+
+private static void PresetListBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+{
+    if (FindPresetItemActionButton(e.OriginalSource as DependencyObject) == null)
+        return;
+    // 点击重命名/删除按钮时，不触发列表选择与预设载入。
+    _suppressPresetSelection = true;
+    if (_presetListBox != null)
+    {
+        _presetListBox.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate()
+        {
+            _suppressPresetSelection = false;
+        }));
+    }
+}
+
+private static Button FindPresetItemActionButton(DependencyObject source)
+{
+    while (source != null)
+    {
+        Button button = source as Button;
+        if (button != null && (button.Uid == "rename" || button.Uid == "delete"))
+            return button;
+        if (source is Visual || source is System.Windows.Media.Media3D.Visual3D)
+            source = VisualTreeHelper.GetParent(source);
+        else if (source is FrameworkContentElement)
+            source = ((FrameworkContentElement)source).Parent;
+        else
+            source = null;
+    }
+    return null;
+}
+
+private static void PresetItemButton_Click(object sender, RoutedEventArgs e)
+{
+    Button button = e.OriginalSource as Button;
+    if (button == null)
+        button = FindPresetItemActionButton(e.OriginalSource as DependencyObject);
+    if (button == null)
+        return;
+    string name = button.Tag as string;
+    if (name == null || name.Length == 0)
+        return;
+    e.Handled = true;
+    if (button.Uid == "rename")
+        RenamePresetByName(name);
+    else if (button.Uid == "delete")
+        DeletePresetByName(name);
+}
+
+private static void RenamePresetByName(string name)
+{
+    if (_presetPopup != null)
+        _presetPopup.IsOpen = false;
+
+    Dictionary<string, Dictionary<string, object>> store = LoadPresetStore();
+    string oldKey = FindPresetKey(store, name);
+    if (oldKey == null)
+    {
+        MessageBox.Show("预设已不存在：" + name, "重命名预设",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        RefreshPresetPopupAfterEdit();
+        return;
+    }
+
+    string newName = null;
+    while (true)
+    {
+        string input = PromptForPresetName(oldKey, "重命名预设", "重命名");
+        if (input == null)
+        {
+            RefreshPresetPopupAfterEdit();
+            return;
+        }
+        input = input.Trim();
+        if (input.Length == 0)
+        {
+            MessageBox.Show("预设名称不能为空。", "重命名预设",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            continue;
+        }
+        if (string.Equals(input, oldKey, StringComparison.Ordinal))
+        {
+            RefreshPresetPopupAfterEdit();
+            return;
+        }
+        string existing = FindPresetKey(store, input);
+        if (existing != null && !string.Equals(existing, oldKey, StringComparison.Ordinal))
+        {
+            MessageBox.Show("预设“" + existing + "”已存在，请换一个名称。", "重命名预设",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            continue;
+        }
+        newName = input;
+        break;
+    }
+
+    Dictionary<string, object> config = store[oldKey];
+    store.Remove(oldKey);
+    store[newName] = config;
+    SavePresetStore(store);
+    _statusText.Text = "已重命名预设：" + oldKey + " → " + newName;
+    RefreshPresetPopupAfterEdit();
+}
+
+private static void DeletePresetByName(string name)
+{
+    if (_presetPopup != null)
+        _presetPopup.IsOpen = false;
+
+    Dictionary<string, Dictionary<string, object>> store = LoadPresetStore();
+    string actualName = FindPresetKey(store, name);
+    if (actualName == null)
+    {
+        MessageBox.Show("预设已不存在：" + name, "删除预设",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        RefreshPresetPopupAfterEdit();
+        return;
+    }
+
+    DialogResult answer = MessageBox.Show(
+        "确定删除预设“" + actualName + "”吗？\n\n此操作不可撤销。",
+        "删除预设", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+    if (answer != DialogResult.Yes)
+    {
+        RefreshPresetPopupAfterEdit();
+        return;
+    }
+
+    store.Remove(actualName);
+    SavePresetStore(store);
+    _statusText.Text = "已删除预设：" + actualName;
+    RefreshPresetPopupAfterEdit();
 }
 
 private static void PresetListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -6520,8 +6684,13 @@ private static string FormatDateOrder(string order)
 
 private static string PromptForPresetName(string initialName)
 {
+    return PromptForPresetName(initialName, "保存预设", "保存");
+}
+
+private static string PromptForPresetName(string initialName, string title, string confirmText)
+{
     Window dialog = new Window();
-    dialog.Title = "保存预设";
+    dialog.Title = title;
     dialog.Width = 400;
     dialog.Height = 180;
     dialog.ResizeMode = ResizeMode.NoResize;
@@ -6567,7 +6736,7 @@ private static string PromptForPresetName(string initialName)
     buttons.Children.Add(cancel);
 
     Button ok = new Button();
-    ok.Content = "保存";
+    ok.Content = confirmText;
     ok.Width = 80;
     ok.Height = 28;
     ok.IsDefault = true;
@@ -6577,7 +6746,7 @@ private static string PromptForPresetName(string initialName)
     {
         if (nameBox.Text == null || nameBox.Text.Trim().Length == 0)
         {
-            MessageBox.Show("请输入预设名称。", "保存预设",
+            MessageBox.Show("请输入预设名称。", title,
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             nameBox.Focus();
             return;
