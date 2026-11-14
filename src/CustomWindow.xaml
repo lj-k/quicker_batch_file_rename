@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.1 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -595,7 +595,9 @@
                 <!-- RELEASE-APPLY-BEGIN -->
                 <Button x:Name="BtnApply" Content="生成输出" Style="{StaticResource PrimaryButton}" Width="110" IsEnabled="False"/>
                 <!-- RELEASE-APPLY-END -->
+                <!-- RELEASE-FINISH-BEGIN -->
                 <Button x:Name="BtnFinish" Content="完成" Style="{StaticResource PrimaryButton}" Width="100" Margin="8,0,0,0"/>
+                <!-- RELEASE-FINISH-END -->
             </StackPanel>
         </Grid>
 

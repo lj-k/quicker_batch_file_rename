@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06
+// 版本：0.06.1
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -30,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06
+// 版本：0.06.1
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -1948,7 +1948,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06
+// 版本：0.06.1
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2077,6 +2077,7 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
         {
             dataContext["origPaths"] = new List<object>();
             dataContext["targetPaths"] = new List<object>();
+            dataContext["actions"] = new List<object>();
         }
     }
 }
@@ -2323,7 +2324,7 @@ private static void AttachToolTips()
     SetTip(_grid, "源路径、目标路径与动作预览。\n鼠标悬浮行可查看四类日期、生效日期、校验码、目标路径和完整错误。\n红底=异常，黄底=校验码计算中，灰底=跳过，绿底=执行成功。");
     SetTip(_statusText, "状态统计：文件总数、跳过项、就绪/异常/计算中数量与校验码进度。\n实时刷新关闭且配置变更后会提示需要手动预览。");
     SetTipByName("BtnCancel", "关闭窗口。\n未执行时：放弃输出，两个输出列表保持为空。\n执行中：询问是否停止；已开始的文件操作会完成，未开始的项目不再执行。");
-    SetTip(_applyButton, "生成两个等长、序号配对的输出列表和预设词典。\n存在异常行时需确认，仅输出就绪行；校验码未算完时需等待。");
+    SetTip(_applyButton, "方案1：按钮显示为【执行】，生成并输出三个非跳过列表（原路径、目标路径、动作），然后关闭窗口继续 Quicker 后续动作；不会修改文件。\n完整开发版：生成两个列表/预设并关闭窗口。\n存在异常行时需确认，仅输出就绪行；校验码未算完时需等待。");
     SetTip(_finishButton, "完成并关闭窗口，继续执行 Quicker 后续动作步骤。\n方案1会写回两个非跳过路径列表；方案2不生成/输出列表变量，只写回预设。");
     SetTip(_execParallelCombo, "执行并行线程数，1~8。\n数值越大复制/移动越快，但会占用更多磁盘与CPU资源。\n重命名操作本身很快，通常无需高并行。");
     SetTip(_execVerifyCheck, "执行后校验。\n复制/移动完成后重新计算目标文件校验码，与源文件校验码比较；\n若模板包含【校验码】，还会检查目标文件名中的校验码标记是否一致。\n重命名不执行该校验。大文件会明显增加耗时。");
@@ -5143,6 +5144,7 @@ private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
 
     List<object> originalPaths = new List<object>();
     List<object> targetPaths = new List<object>();
+    List<object> actions = new List<object>();
     for (int i = 0; i < sourceRows.Count; i++)
     {
         Dictionary<string, object> item = sourceRows[i];
@@ -5156,9 +5158,10 @@ private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
             continue;
         originalPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
         targetPaths.Add(target);
+        actions.Add(action);
     }
 
-    if (originalPaths.Count != targetPaths.Count)
+    if (originalPaths.Count != targetPaths.Count || originalPaths.Count != actions.Count)
     {
         MessageBox.Show("输出列表配对失败，请重试。", "批量重命名器",
             MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -5167,6 +5170,7 @@ private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
 
     _data["origPaths"] = originalPaths;
     _data["targetPaths"] = targetPaths;
+    _data["actions"] = actions;
 }
 
 private static void EnsureDefaultPreset()
