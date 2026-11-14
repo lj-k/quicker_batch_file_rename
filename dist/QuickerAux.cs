@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.01
+// 版本：0.02
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -26,13 +26,13 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.01
+// 版本：0.02
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
 // ============================================================================
 
-public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/【源文件名】-【校验码】.【扩展名】";
+public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】";
 
 public static readonly string[] SupportedAlgorithms = new string[] { "CRC32", "BLAKE3", "MD5", "SHA-256" };
 public static readonly string[] SupportedDateSources = new string[] { "filename", "exif", "modified", "created" };
@@ -42,9 +42,9 @@ public static readonly string[] TemplateTokens = new string[] {
 };
 
 private static readonly Regex FilenameDate1Regex =
-    new Regex(@"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    new Regex(@"(?<!\d)(\d{4})-(\d{2})-(\d{2})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 private static readonly Regex FilenameDate2Regex =
-    new Regex(@"(?<!\d)(\d{8})(?!\d)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    new Regex(@"(?<!\d)(\d{8})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 private static readonly Regex TemplateTokenRegex =
     new Regex("【[^】]*】", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -114,6 +114,68 @@ public static string NormalizeDateSource(string source)
     if (value == "created" || value == "创建日期")
         return "created";
     return "filename";
+}
+
+public static string NormalizeFallbackOrder(string order)
+{
+    List<string> result = new List<string>();
+    if (order != null)
+    {
+        string[] parts = order.Split(',');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string part = parts[i] == null ? "" : parts[i].Trim();
+            if (part.Length == 0)
+                continue;
+            string normalized = NormalizeDateSource(part);
+            if (!result.Contains(normalized))
+                result.Add(normalized);
+        }
+    }
+    for (int i = 0; i < SupportedDateSources.Length; i++)
+    {
+        if (!result.Contains(SupportedDateSources[i]))
+            result.Add(SupportedDateSources[i]);
+    }
+    return string.Join(",", result.ToArray());
+}
+
+public static bool TryResolveEffectiveDate(IDictionary<string, DateTime?> dates,
+    string primarySource, bool fallbackEnabled, string fallbackOrder,
+    out DateTime? effectiveDate, out string effectiveSource)
+{
+    effectiveDate = null;
+    effectiveSource = "";
+
+    if (dates == null)
+        return false;
+
+    string primary = NormalizeDateSource(primarySource);
+    DateTime? value;
+    if (dates.TryGetValue(primary, out value) && value.HasValue)
+    {
+        effectiveDate = value;
+        effectiveSource = primary;
+        return true;
+    }
+
+    if (!fallbackEnabled)
+        return false;
+
+    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+    for (int i = 0; i < order.Length; i++)
+    {
+        string source = order[i];
+        if (source == primary)
+            continue;
+        if (dates.TryGetValue(source, out value) && value.HasValue)
+        {
+            effectiveDate = value;
+            effectiveSource = source;
+            return true;
+        }
+    }
+    return false;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -259,7 +321,7 @@ public static string BuildChecksumBadge(string algorithm, int digits, string pre
     string code = TruncateHash(hex, actualDigits);
     string left = (prefix == null ? "" : prefix);
     string right = (suffix == null ? "" : suffix);
-    return "[" + left + label + "-" + code + right + "]";
+    return left + label + "-" + code + right;
 }
 
 public static string BuildPendingChecksumBadge(string algorithm, int digits, string prefix, string suffix)
@@ -274,7 +336,7 @@ public static string BuildPendingChecksumBadge(string algorithm, int digits, str
     string label = GetAlgorithmLabel(value, actualDigits);
     string left = (prefix == null ? "" : prefix);
     string right = (suffix == null ? "" : suffix);
-    return "[" + left + label + "-…" + right + "]";
+    return left + label + "-…" + right;
 }
 
 public static string ComputeHashHex(string filePath, string algorithm, out string error)
@@ -676,8 +738,9 @@ public static string RenderTemplate(string template, IDictionary<string, string>
     return builder.ToString();
 }
 
-public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime effectiveDate,
-    string baseName, string extension, string checksumBadge, out string targetPath, out string error)
+public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime? effectiveDate,
+    string missingDateText, string baseName, string extension, string checksumBadge,
+    out string targetPath, out string error)
 {
     targetPath = null;
     error = null;
@@ -698,10 +761,26 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
         return false;
     }
 
+    string dateYear;
+    string dateMonth;
+    string dateDay;
+    if (effectiveDate.HasValue)
+    {
+        dateYear = effectiveDate.Value.ToString("yyyy", CultureInfo.InvariantCulture);
+        dateMonth = effectiveDate.Value.ToString("MM", CultureInfo.InvariantCulture);
+        dateDay = effectiveDate.Value.ToString("dd", CultureInfo.InvariantCulture);
+    }
+    else
+    {
+        dateYear = missingDateText == null ? "" : missingDateText;
+        dateMonth = dateYear;
+        dateDay = dateYear;
+    }
+
     Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.Ordinal);
-    values["【日期yyyy】"] = effectiveDate.ToString("yyyy", CultureInfo.InvariantCulture);
-    values["【日期mm】"] = effectiveDate.ToString("MM", CultureInfo.InvariantCulture);
-    values["【日期dd】"] = effectiveDate.ToString("dd", CultureInfo.InvariantCulture);
+    values["【日期yyyy】"] = dateYear;
+    values["【日期mm】"] = dateMonth;
+    values["【日期dd】"] = dateDay;
     values["【根路径】"] = rootDirectory == null ? "" : rootDirectory;
     values["【源文件名】"] = baseName == null ? "" : baseName;
     values["【扩展名】"] = extension == null ? "" : extension;
@@ -712,7 +791,7 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     if (normalized == null)
         return false;
 
-    if (!ValidateWindowsPath(normalized, out error))
+    if (!ValidateCrossPlatformPath(normalized, out error))
         return false;
 
     targetPath = normalized;
@@ -768,14 +847,19 @@ public static bool IsRootedWindowsPath(string path)
 {
     if (path == null || path.Length < 2)
         return false;
-    if (char.IsLetter(path[0]) && path[1] == ':')
+    if (IsAsciiDriveLetter(path[0]) && path[1] == ':')
         return true;
     if (path.Length >= 2 && path[0] == '\\' && path[1] == '\\')
         return true;
     return false;
 }
 
-public static bool ValidateWindowsPath(string path, out string error)
+private static bool IsAsciiDriveLetter(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+public static bool ValidateCrossPlatformPath(string path, out string error)
 {
     error = null;
     if (path == null || path.Trim().Length == 0)
@@ -783,24 +867,17 @@ public static bool ValidateWindowsPath(string path, out string error)
         error = "目标路径为空";
         return false;
     }
+
+    List<string> problems = new List<string>();
     if (path.IndexOf('/') >= 0)
-    {
-        error = "目标路径包含未规范化的斜杠";
-        return false;
-    }
+        problems.Add("目标路径包含未规范化的斜杠");
     if (path[path.Length - 1] == '\\')
-    {
-        error = "目标路径以目录分隔符结尾，缺少文件名";
-        return false;
-    }
+        problems.Add("目标路径以目录分隔符结尾，缺少文件名");
 
     bool isUnc = path.StartsWith("\\\\", StringComparison.Ordinal);
-    bool isDrive = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && path[2] == '\\';
+    bool isDrive = path.Length >= 3 && IsAsciiDriveLetter(path[0]) && path[1] == ':' && path[2] == '\\';
     if (!isUnc && !isDrive)
-    {
-        error = "目标路径不是绝对路径（应为 X:\\... 或 \\\\服务器\\共享\\...）";
-        return false;
-    }
+        problems.Add("目标路径不是绝对路径（应为 X:\\... 或 \\\\服务器\\共享\\...）");
 
     string[] segments = path.Split('\\');
     if (isUnc)
@@ -812,11 +889,15 @@ public static bool ValidateWindowsPath(string path, out string error)
                 nonEmptySegments++;
         }
         if (nonEmptySegments < 3)
-        {
-            error = "UNC 目标路径至少需要服务器、共享和文件名";
-            return false;
-        }
+            problems.Add("UNC 目标路径至少需要服务器、共享和文件名");
     }
+
+    StringBuilder invalidChars = new StringBuilder();
+    HashSet<string> reservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    bool hasDotSegment = false;
+    bool hasTrailingIssue = false;
+    bool hasSegmentLengthIssue = false;
+
     for (int i = 0; i < segments.Length; i++)
     {
         string segment = segments[i];
@@ -826,33 +907,91 @@ public static bool ValidateWindowsPath(string path, out string error)
             continue;
 
         if (segment == "." || segment == "..")
-        {
-            error = "目标路径不能包含 . 或 .. 目录段";
-            return false;
-        }
+            hasDotSegment = true;
+
         if (segment[segment.Length - 1] == ' ' || segment[segment.Length - 1] == '.')
-        {
-            error = "路径段不能以空格或点结尾：" + segment;
-            return false;
-        }
+            hasTrailingIssue = true;
+
+        if (segment.Length > 255 || Encoding.UTF8.GetByteCount(segment) > 255)
+            hasSegmentLengthIssue = true;
+
         for (int j = 0; j < segment.Length; j++)
         {
             char c = segment[j];
-            if (c < 32 || c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*')
+            if (IsCrossPlatformInvalidChar(c))
             {
-                error = "路径段包含非法字符：" + segment;
-                return false;
+                if (invalidChars.ToString().IndexOf(c) < 0)
+                    invalidChars.Append(c);
             }
         }
+
+        string reserved = GetReservedDeviceName(segment);
+        if (reserved != null)
+            reservedNames.Add(reserved);
     }
+
+    if (hasDotSegment)
+        problems.Add("目标路径不能包含 . 或 .. 目录段");
+    if (hasTrailingIssue)
+        problems.Add("路径段不能以空格或点结尾");
+    if (hasSegmentLengthIssue)
+        problems.Add("存在路径段超过255字符或255字节");
+    if (invalidChars.Length > 0)
+        problems.Add("路径段包含跨平台非法字符：" + invalidChars.ToString());
+    if (reservedNames.Count > 0)
+    {
+        string[] names = new string[reservedNames.Count];
+        reservedNames.CopyTo(names);
+        problems.Add("路径段包含Windows保留设备名：" + string.Join("、", names));
+    }
+    if (path.Length > 259)
+        problems.Add("总路径超过Windows 259字符限制");
+    if (Encoding.UTF8.GetByteCount(path) > 1024)
+        problems.Add("总路径超过macOS 1024字节限制");
 
     string fileName = GetLastPathSegment(path);
     if (fileName == null || fileName.Length == 0)
+        problems.Add("目标路径缺少文件名");
+
+    if (problems.Count > 0)
     {
-        error = "目标路径缺少文件名";
+        error = string.Join("；", problems.ToArray());
         return false;
     }
     return true;
+}
+
+private static bool IsCrossPlatformInvalidChar(char c)
+{
+    if (c < 32)
+        return true;
+    return c == '<' || c == '>' || c == ':' || c == '"' ||
+           c == '|' || c == '?' || c == '*';
+}
+
+private static string GetReservedDeviceName(string segment)
+{
+    if (segment == null || segment.Length == 0)
+        return null;
+
+    int dot = segment.IndexOf('.');
+    string baseName = (dot >= 0 ? segment.Substring(0, dot) : segment).Trim();
+    if (baseName.Length == 0)
+        return null;
+    string upper = baseName.ToUpperInvariant();
+
+    if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+        upper == "CLOCK$" || upper == "CONIN$" || upper == "CONOUT$")
+        return baseName;
+
+    if (upper.Length == 4)
+    {
+        string prefix = upper.Substring(0, 3);
+        char number = upper[3];
+        if ((prefix == "COM" || prefix == "LPT") && number >= '0' && number <= '9')
+            return baseName;
+    }
+    return null;
 }
 
 public static string GetLastPathSegment(string path)
@@ -879,10 +1018,15 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["rootPath"] = "";
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
     config["dateSource"] = "filename";
+    config["dateFallbackEnabled"] = "true";
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(null);
+    config["dateMissingMode"] = "empty";
+    config["dateMissingText"] = "";
+    config["realTimePreview"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
-    config["checksumPrefix"] = "";
-    config["checksumSuffix"] = "";
+    config["checksumPrefix"] = "[";
+    config["checksumSuffix"] = "]";
     config["template"] = DefaultTemplate;
     return config;
 }
@@ -910,6 +1054,22 @@ public static string GetConfigString(Dictionary<string, string> config, string k
     return value;
 }
 
+public static bool GetConfigBool(Dictionary<string, string> config, string key, bool defaultValue)
+{
+    string value = GetConfigString(config, key, null);
+    if (value == null)
+        return defaultValue;
+    value = value.Trim().ToLowerInvariant();
+    if (value == "true" || value == "1" || value == "yes" || value == "是")
+        return true;
+    if (value == "false" || value == "0" || value == "no" || value == "否")
+        return false;
+    bool result;
+    if (bool.TryParse(value, out result))
+        return result;
+    return defaultValue;
+}
+
 public static void NormalizeConfig(Dictionary<string, string> config)
 {
     if (config == null)
@@ -925,6 +1085,12 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
 
     config["dateSource"] = NormalizeDateSource(GetConfigString(config, "dateSource", "filename"));
+    config["dateFallbackEnabled"] = GetConfigBool(config, "dateFallbackEnabled", true) ? "true" : "false";
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(GetConfigString(config, "dateFallbackOrder", ""));
+    string missingMode = (GetConfigString(config, "dateMissingMode", "empty") ?? "").Trim().ToLowerInvariant();
+    config["dateMissingMode"] = missingMode == "custom" ? "custom" : "empty";
+    config["dateMissingText"] = GetConfigString(config, "dateMissingText", "");
+    config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
     if (!IsSupportedAlgorithm(algorithm))
@@ -939,8 +1105,8 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     if (digits > maxDigits) digits = maxDigits;
     config["checksumDigits"] = digits.ToString(CultureInfo.InvariantCulture);
 
-    config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "");
-    config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "");
+    config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "[");
+    config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "]");
 
     string template = GetConfigString(config, "template", DefaultTemplate);
     if (template == null)
@@ -953,11 +1119,16 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.01";
+    preset["presetVersion"] = "0.02";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
     preset["dateSource"] = normalized["dateSource"];
+    preset["dateFallbackEnabled"] = normalized["dateFallbackEnabled"];
+    preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
+    preset["dateMissingMode"] = normalized["dateMissingMode"];
+    preset["dateMissingText"] = normalized["dateMissingText"];
+    preset["realTimePreview"] = normalized["realTimePreview"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
     preset["checksumPrefix"] = normalized["checksumPrefix"];
@@ -973,8 +1144,10 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
     bool applied = false;
     string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear", "dateSource", "checksumAlgorithm",
-        "checksumDigits", "checksumPrefix", "checksumSuffix", "template"
+        "rootMode", "rootPath", "startYear", "dateSource",
+        "dateFallbackEnabled", "dateFallbackOrder", "dateMissingMode", "dateMissingText",
+        "realTimePreview", "checksumAlgorithm", "checksumDigits",
+        "checksumPrefix", "checksumSuffix", "template"
     };
     for (int i = 0; i < keys.Length; i++)
     {
@@ -991,7 +1164,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.01
+// 版本：0.02
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -1014,6 +1187,17 @@ private static TextBlock _statusText;
 private static ProgressBar _progress;
 private static Button _browseRootButton;
 private static Button _applyButton;
+private static Button _previewButton;
+private static CheckBox _realTimeCheck;
+private static CheckBox _fallbackEnabledCheck;
+private static ComboBox _fallback1Combo;
+private static ComboBox _fallback2Combo;
+private static ComboBox _fallback3Combo;
+private static ComboBox _fallback4Combo;
+private static ComboBox _missingModeCombo;
+private static TextBox _missingText;
+private static Border _errorBanner;
+private static TextBlock _errorBannerText;
 
 private static ObservableCollection<Dictionary<string, object>> _rows =
     new ObservableCollection<Dictionary<string, object>>();
@@ -1031,6 +1215,7 @@ private static TextPointer _lastCaret;
 private static bool _suppressEvents = false;
 private static bool _suppressEditor = false;
 private static bool _scanning = false;
+private static bool _previewDirty = false;
 private static volatile bool _hashStop = false;
 private static volatile bool _hashRunning = false;
 private static string _hashAlgorithm = "";
@@ -1122,6 +1307,17 @@ private static void FindControls(Window win)
     _progress = (ProgressBar)win.FindName("Progress");
     _browseRootButton = (Button)win.FindName("BrowseRootButton");
     _applyButton = (Button)win.FindName("BtnApply");
+    _previewButton = (Button)win.FindName("BtnPreview");
+    _realTimeCheck = (CheckBox)win.FindName("RealTimeCheck");
+    _fallbackEnabledCheck = (CheckBox)win.FindName("FallbackEnabledCheck");
+    _fallback1Combo = (ComboBox)win.FindName("Fallback1Combo");
+    _fallback2Combo = (ComboBox)win.FindName("Fallback2Combo");
+    _fallback3Combo = (ComboBox)win.FindName("Fallback3Combo");
+    _fallback4Combo = (ComboBox)win.FindName("Fallback4Combo");
+    _missingModeCombo = (ComboBox)win.FindName("MissingModeCombo");
+    _missingText = (TextBox)win.FindName("MissingText");
+    _errorBanner = (Border)win.FindName("ErrorBanner");
+    _errorBannerText = (TextBlock)win.FindName("ErrorBannerText");
 }
 
 private static void ResetRuntimeState()
@@ -1142,6 +1338,7 @@ private static void ResetRuntimeState()
     _skippedFolders = 0;
     _skippedInvalid = 0;
     _lastCaret = null;
+    _previewDirty = false;
     _suppressEvents = false;
     _suppressEditor = false;
     if (_debounceTimer != null)
@@ -1181,6 +1378,16 @@ private static void AttachEvents(Window win)
     _startYearCombo.SelectionChanged += StartYearCombo_SelectionChanged;
     _dateSourceCombo.SelectionChanged += DateSourceCombo_SelectionChanged;
     _algorithmCombo.SelectionChanged += AlgorithmCombo_SelectionChanged;
+    _realTimeCheck.Checked += RealTimeCheck_Changed;
+    _realTimeCheck.Unchecked += RealTimeCheck_Changed;
+    _fallbackEnabledCheck.Checked += FallbackEnabledCheck_Changed;
+    _fallbackEnabledCheck.Unchecked += FallbackEnabledCheck_Changed;
+    _fallback1Combo.SelectionChanged += FallbackOrder_SelectionChanged;
+    _fallback2Combo.SelectionChanged += FallbackOrder_SelectionChanged;
+    _fallback3Combo.SelectionChanged += FallbackOrder_SelectionChanged;
+    _fallback4Combo.SelectionChanged += FallbackOrder_SelectionChanged;
+    _missingModeCombo.SelectionChanged += MissingModeCombo_SelectionChanged;
+    _missingText.TextChanged += MissingText_TextChanged;
     _digitsText.TextChanged += DigitsText_TextChanged;
     _digitsText.LostFocus += DigitsText_LostFocus;
     _prefixText.TextChanged += PrefixText_TextChanged;
@@ -1199,6 +1406,7 @@ private static void AttachEvents(Window win)
     AttachClick("BtnResetTemplate", ResetTemplate_Click);
     AttachClick("BtnLoadPreset", LoadPreset_Click);
     AttachClick("BtnSavePreset", SavePreset_Click);
+    AttachClick("BtnPreview", Preview_Click);
     AttachClick("BtnCancel", Cancel_Click);
     AttachClick("BtnApply", Apply_Click);
 
@@ -1233,6 +1441,11 @@ private static void SyncUiFromConfig()
     SelectStartYear(GetConfigInt(_config, "startYear", 2000));
     SelectComboByTag(_dateSourceCombo, _config["dateSource"]);
     SelectComboByTag(_algorithmCombo, _config["checksumAlgorithm"]);
+    _realTimeCheck.IsChecked = GetConfigBool(_config, "realTimePreview", true);
+    _fallbackEnabledCheck.IsChecked = GetConfigBool(_config, "dateFallbackEnabled", true);
+    SyncFallbackCombosFromConfig();
+    SelectComboByTag(_missingModeCombo, _config["dateMissingMode"]);
+    _missingText.Text = _config["dateMissingText"];
     _digitsText.Text = _config["checksumDigits"];
     _prefixText.Text = _config["checksumPrefix"];
     _suffixText.Text = _config["checksumSuffix"];
@@ -1241,6 +1454,8 @@ private static void SyncUiFromConfig()
 
     UpdateRootPathText();
     UpdateChecksumBadge();
+    UpdateFallbackUiState();
+    UpdateRealTimeUi();
 }
 
 private static void SelectStartYear(int year)
@@ -1278,6 +1493,53 @@ private static void SelectComboByTag(ComboBox combo, string tag)
         combo.SelectedIndex = 0;
 }
 
+private static string GetFallbackOrderFromUi()
+{
+    string[] tags = new string[] {
+        GetComboTag(_fallback1Combo), GetComboTag(_fallback2Combo),
+        GetComboTag(_fallback3Combo), GetComboTag(_fallback4Combo)
+    };
+    StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < tags.Length; i++)
+    {
+        if (tags[i] == null || tags[i].Length == 0)
+            continue;
+        if (builder.Length > 0)
+            builder.Append(',');
+        builder.Append(tags[i]);
+    }
+    return builder.ToString();
+}
+
+private static void SyncFallbackCombosFromConfig()
+{
+    string order = NormalizeFallbackOrder(GetConfigString(_config, "dateFallbackOrder", ""));
+    string[] parts = order.Split(',');
+    SelectComboByTag(_fallback1Combo, parts.Length > 0 ? parts[0] : "filename");
+    SelectComboByTag(_fallback2Combo, parts.Length > 1 ? parts[1] : "exif");
+    SelectComboByTag(_fallback3Combo, parts.Length > 2 ? parts[2] : "modified");
+    SelectComboByTag(_fallback4Combo, parts.Length > 3 ? parts[3] : "created");
+}
+
+private static void UpdateFallbackUiState()
+{
+    bool fallback = GetConfigBool(_config, "dateFallbackEnabled", true);
+    _fallback1Combo.IsEnabled = fallback;
+    _fallback2Combo.IsEnabled = fallback;
+    _fallback3Combo.IsEnabled = fallback;
+    _fallback4Combo.IsEnabled = fallback;
+
+    _missingModeCombo.IsEnabled = !fallback;
+    bool custom = GetComboTag(_missingModeCombo) == "custom";
+    _missingText.IsEnabled = !fallback && custom;
+}
+
+private static void UpdateRealTimeUi()
+{
+    bool realTime = GetConfigBool(_config, "realTimePreview", true);
+    _previewButton.IsEnabled = !realTime && !_scanning;
+}
+
 private static void ReadConfigFromUi()
 {
     _config["rootMode"] = GetComboTag(_rootModeCombo) ?? "current";
@@ -1292,6 +1554,11 @@ private static void ReadConfigFromUi()
     _config["startYear"] = year.ToString(CultureInfo.InvariantCulture);
 
     _config["dateSource"] = GetComboTag(_dateSourceCombo) ?? "filename";
+    _config["dateFallbackEnabled"] = _fallbackEnabledCheck.IsChecked == true ? "true" : "false";
+    _config["dateFallbackOrder"] = GetFallbackOrderFromUi();
+    _config["dateMissingMode"] = GetComboTag(_missingModeCombo) ?? "empty";
+    _config["dateMissingText"] = _missingText.Text == null ? "" : _missingText.Text;
+    _config["realTimePreview"] = _realTimeCheck.IsChecked == true ? "true" : "false";
     _config["checksumAlgorithm"] = GetComboTag(_algorithmCombo) ?? "CRC32";
     _config["checksumDigits"] = _digitsText.Text == null ? "" : _digitsText.Text.Trim();
     _config["checksumPrefix"] = _prefixText.Text == null ? "" : _prefixText.Text;
@@ -1378,6 +1645,36 @@ private static void AlgorithmCombo_SelectionChanged(object sender, SelectionChan
     ApplyUiConfig();
 }
 
+private static void RealTimeCheck_Changed(object sender, RoutedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void FallbackEnabledCheck_Changed(object sender, RoutedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void FallbackOrder_SelectionChanged(object sender, SelectionChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void MissingModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void MissingText_TextChanged(object sender, TextChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ScheduleApply();
+}
+
 private static void DigitsText_TextChanged(object sender, TextChangedEventArgs e)
 {
     if (_suppressEvents) return;
@@ -1434,8 +1731,14 @@ private static void ApplyUiConfig()
     if (_suppressEvents || _config == null)
         return;
 
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+
     string oldStartYear = GetConfigString(_config, "startYear", "2000");
     string oldDateSource = GetConfigString(_config, "dateSource", "filename");
+    string oldFallbackEnabled = GetConfigString(_config, "dateFallbackEnabled", "true");
+    string oldFallbackOrder = GetConfigString(_config, "dateFallbackOrder", "");
+    string oldRealTime = GetConfigString(_config, "realTimePreview", "true");
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
     bool oldNeedsHash = TemplateContainsToken(GetConfigString(_config, "template", DefaultTemplate), "【校验码】");
@@ -1452,8 +1755,14 @@ private static void ApplyUiConfig()
     }
 
     NormalizeConfig(_config);
+    _suppressEvents = true;
+    SyncFallbackCombosFromConfig();
+    _suppressEvents = false;
+
     UpdateChecksumBadge();
     UpdateRootPathText();
+    UpdateFallbackUiState();
+    UpdateRealTimeUi();
 
     if (!_digitsText.IsKeyboardFocusWithin)
         _digitsText.Text = _config["checksumDigits"];
@@ -1470,18 +1779,49 @@ private static void ApplyUiConfig()
         _progress.Visibility = Visibility.Collapsed;
     }
 
-    bool startChanged = oldStartYear != _config["startYear"];
-    bool dateChanged = oldDateSource != _config["dateSource"];
+    bool realTime = GetConfigBool(_config, "realTimePreview", true);
+    bool realTimeChanged = (oldRealTime != _config["realTimePreview"]);
+    bool startChanged = (oldStartYear != _config["startYear"]);
+    bool dateChanged = (oldDateSource != _config["dateSource"]);
+    bool fallbackChanged = (oldFallbackEnabled != _config["dateFallbackEnabled"] ||
+        NormalizeFallbackOrder(oldFallbackOrder) != _config["dateFallbackOrder"]);
 
+    if (realTimeChanged && realTime)
+    {
+        _previewDirty = false;
+        RefreshFilenameDates(true);
+        return;
+    }
+
+    if (!realTime)
+    {
+        if (realTimeChanged)
+        {
+            _previewDirty = false;
+            RefreshFilenameDates(true);
+            return;
+        }
+
+        _previewDirty = true;
+        if (startChanged)
+            RefreshFilenameDates(false);
+        else if (dateChanged || fallbackChanged)
+            RefreshEffectiveDates(false);
+        RefreshErrorBanner("");
+        UpdateStatus();
+        return;
+    }
+
+    _previewDirty = false;
     if (startChanged)
-        RefreshFilenameDates();
-    else if (dateChanged)
-        RefreshEffectiveDates();
+        RefreshFilenameDates(true);
+    else if (dateChanged || fallbackChanged)
+        RefreshEffectiveDates(true);
     else
         RecomputeAll();
 }
 
-private static void RefreshFilenameDates()
+private static void RefreshFilenameDates(bool recomputeTarget)
 {
     int startYear = GetConfigInt(_config, "startYear", 2000);
     for (int i = 0; i < _files.Count; i++)
@@ -1495,48 +1835,56 @@ private static void RefreshFilenameDates()
         item["FileNameDate"] = fileDate;
         UpdateEffectiveDate(item);
     }
-    RecomputeAll();
+
+    if (recomputeTarget)
+    {
+        RecomputeAll();
+    }
+    else
+    {
+        for (int i = 0; i < _files.Count; i++)
+            RefreshRowDetails(_files[i]);
+        if (_grid != null)
+            _grid.Items.Refresh();
+        UpdateStatus();
+    }
 }
 
-private static void RefreshEffectiveDates()
+private static void RefreshEffectiveDates(bool recomputeTarget)
 {
     for (int i = 0; i < _files.Count; i++)
         UpdateEffectiveDate(_files[i]);
-    RecomputeAll();
+
+    if (recomputeTarget)
+    {
+        RecomputeAll();
+    }
+    else
+    {
+        for (int i = 0; i < _files.Count; i++)
+            RefreshRowDetails(_files[i]);
+        if (_grid != null)
+            _grid.Items.Refresh();
+        UpdateStatus();
+    }
 }
 
 private static void UpdateEffectiveDate(Dictionary<string, object> item)
 {
-    string source = _config["dateSource"];
-    string used = source;
-    DateTime? value = null;
+    Dictionary<string, DateTime?> dates = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
+    dates["filename"] = GetDate(item, "FileNameDate");
+    dates["exif"] = GetDate(item, "ExifDate");
+    dates["modified"] = GetDate(item, "Modified");
+    dates["created"] = GetDate(item, "Created");
 
-    if (source == "filename")
-    {
-        value = GetDate(item, "FileNameDate");
-        if (!value.HasValue) { value = GetDate(item, "ExifDate"); used = "exif"; }
-        if (!value.HasValue) { value = GetDate(item, "Modified"); used = "modified"; }
-        if (!value.HasValue) { value = GetDate(item, "Created"); used = "created"; }
-    }
-    else if (source == "exif")
-    {
-        value = GetDate(item, "ExifDate");
-        if (!value.HasValue) { value = GetDate(item, "Modified"); used = "modified"; }
-        if (!value.HasValue) { value = GetDate(item, "Created"); used = "created"; }
-    }
-    else if (source == "modified")
-    {
-        value = GetDate(item, "Modified");
-        if (!value.HasValue) { value = GetDate(item, "Created"); used = "created"; }
-    }
-    else
-    {
-        value = GetDate(item, "Created");
-        used = "created";
-    }
+    DateTime? effectiveDate;
+    string effectiveSource;
+    bool resolved = TryResolveEffectiveDate(dates, _config["dateSource"],
+        GetConfigBool(_config, "dateFallbackEnabled", true),
+        _config["dateFallbackOrder"], out effectiveDate, out effectiveSource);
 
-    item["EffectiveDate"] = value;
-    item["EffectiveSource"] = used;
+    item["EffectiveDate"] = effectiveDate;
+    item["EffectiveSource"] = resolved ? effectiveSource : "";
 }
 
 private static DateTime? GetDate(Dictionary<string, object> item, string key)
@@ -1701,6 +2049,8 @@ private static void FinishScan(int generation)
     for (int i = 0; i < _files.Count; i++)
         UpdateRowDates(_files[i]);
 
+    _previewDirty = false;
+    UpdateRealTimeUi();
     RecomputeAll();
 }
 
@@ -1997,6 +2347,12 @@ private static void UpdateHashProgress()
     if (_hashTotal <= 0)
         return;
 
+    if (_previewDirty)
+    {
+        _progress.Visibility = Visibility.Collapsed;
+        return;
+    }
+
     _progress.Visibility = Visibility.Visible;
     _progress.IsIndeterminate = false;
     _progress.Minimum = 0;
@@ -2019,7 +2375,7 @@ private static void UpdateHashProgress()
 
 private static void RecomputeAll()
 {
-    if (_grid == null || _scanning)
+    if (_grid == null || _scanning || _previewDirty)
         return;
 
     string template = _config["template"];
@@ -2035,6 +2391,8 @@ private static void RecomputeAll()
     string customRoot = _config["rootPath"];
     bool customRootMissing = (rootMode == "custom" &&
         (customRoot == null || customRoot.Trim().Length == 0));
+    string missingDateText = _config["dateMissingMode"] == "custom"
+        ? _config["dateMissingText"] : "";
 
     // 第一遍：计算每个文件的目标路径。
     for (int i = 0; i < _files.Count; i++)
@@ -2069,11 +2427,6 @@ private static void RecomputeAll()
         }
 
         DateTime? effectiveDate = GetDate(item, "EffectiveDate");
-        if (!effectiveDate.HasValue)
-        {
-            SetRowError(item, "没有可用日期", "日期错误");
-            continue;
-        }
 
         bool hashPending = false;
         string checksum = "";
@@ -2103,7 +2456,7 @@ private static void RecomputeAll()
         string extension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
         string target;
         string error;
-        bool ok = TryBuildTargetPath(template, rootDirectory, effectiveDate.Value,
+        bool ok = TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
             baseName, extension, checksum, out target, out error);
 
         if (!ok)
@@ -2186,11 +2539,11 @@ private static void RecomputeAll()
 
     _grid.Items.Refresh();
     UpdateStatus();
+    RefreshErrorBanner(templateValid ? null :
+        (badToken == null || badToken.Length == 0
+            ? "目标路径模板为空" : "模板包含未知胶囊：" + badToken));
 
-    int statusReady;
-    int statusErrors;
-    int statusPending;
-    CountRows(out statusReady, out statusErrors, out statusPending);
+    int statusPending = CountPendingRows();
     if (statusPending == 0)
         _progress.Visibility = Visibility.Collapsed;
 
@@ -2238,6 +2591,12 @@ private static string BuildDetails(Dictionary<string, object> item)
     builder.AppendLine("文件名中的日期：" + FormatDate(item["FileNameDate"]));
     builder.AppendLine("生效日期：" + FormatDate(item["EffectiveDate"]) +
         "（来源：" + GetDateSourceName(Convert.ToString(item["EffectiveSource"], CultureInfo.InvariantCulture)) + "）");
+    if (!GetDate(item, "EffectiveDate").HasValue)
+    {
+        string replacement = _config["dateMissingMode"] == "custom"
+            ? (_config["dateMissingText"] == null ? "" : _config["dateMissingText"]) : "";
+        builder.AppendLine("日期缺失替换值：" + (replacement.Length == 0 ? "（空字符串）" : replacement));
+    }
     builder.AppendLine("扩展名：" + Convert.ToString(item["Ext"], CultureInfo.InvariantCulture));
 
     string hash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
@@ -2280,6 +2639,17 @@ private static void UpdateStatus()
     int pending;
     CountRows(out ready, out errors, out pending);
 
+    bool realTime = GetConfigBool(_config, "realTimePreview", true);
+    _previewButton.IsEnabled = (!realTime && !_scanning);
+
+    if (_previewDirty && !_scanning)
+    {
+        _statusText.Text = "配置已变更，点击【预览】刷新目标路径";
+        _applyButton.IsEnabled = false;
+        _progress.Visibility = Visibility.Collapsed;
+        return;
+    }
+
     if (_scanning)
     {
         _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
@@ -2305,8 +2675,102 @@ private static void UpdateStatus()
     _statusText.Text = text;
 
     _applyButton.IsEnabled = (!_scanning && pending == 0 && ready > 0);
-    if (!(pending > 0 && TemplateContainsToken(_config["template"], "【校验码】")))
+    if (pending > 0 && TemplateContainsToken(_config["template"], "【校验码】"))
+    {
+        _progress.Visibility = Visibility.Visible;
+        if (_hashTotal > 0)
+        {
+            _progress.IsIndeterminate = false;
+            _progress.Maximum = _hashTotal;
+            _progress.Value = _hashDone;
+        }
+        else
+        {
+            _progress.IsIndeterminate = true;
+        }
+    }
+    else
+    {
         _progress.Visibility = Visibility.Collapsed;
+    }
+}
+
+private static void RefreshErrorBanner(string globalError)
+{
+    if (_errorBanner == null || _errorBannerText == null)
+        return;
+
+    if (_previewDirty)
+    {
+        _errorBanner.Visibility = Visibility.Collapsed;
+        return;
+    }
+
+    List<string> messageOrder = new List<string>();
+    Dictionary<string, int> counts = new Dictionary<string, int>(StringComparer.Ordinal);
+    int errorRows = 0;
+
+    for (int i = 0; i < _files.Count; i++)
+    {
+        Dictionary<string, object> item = _files[i];
+        if (!GetBool(item, "HasError"))
+            continue;
+        errorRows++;
+        string message = Convert.ToString(item["Error"], CultureInfo.InvariantCulture);
+        if (message == null || message.Length == 0)
+            message = Convert.ToString(item["Status"], CultureInfo.InvariantCulture);
+        if (message == null || message.Length == 0)
+            message = "未知错误";
+        int count;
+        counts.TryGetValue(message, out count);
+        if (count == 0)
+            messageOrder.Add(message);
+        counts[message] = count + 1;
+    }
+
+    if (errorRows == 0 && globalError != null && globalError.Length > 0)
+    {
+        messageOrder.Add(globalError);
+        counts[globalError] = 1;
+    }
+
+    if (messageOrder.Count == 0)
+    {
+        _errorBannerText.Text = "";
+        _errorBanner.Visibility = Visibility.Collapsed;
+        return;
+    }
+
+    StringBuilder builder = new StringBuilder();
+    if (errorRows > 0)
+        builder.Append("发现 " + errorRows + " 个异常路径，请在表格中查看红底高亮行。");
+    else
+        builder.Append("发现路径配置错误。");
+
+    int shown = 0;
+    for (int i = 0; i < messageOrder.Count && shown < 5; i++)
+    {
+        string message = messageOrder[i];
+        int count = counts[message];
+        builder.Append("\n• " + message);
+        if (count > 1)
+            builder.Append("（" + count + " 个）");
+        shown++;
+    }
+    if (messageOrder.Count > shown)
+        builder.Append("\n• …");
+
+    _errorBannerText.Text = builder.ToString();
+    _errorBanner.Visibility = Visibility.Visible;
+}
+
+private static int CountPendingRows()
+{
+    int ready;
+    int errors;
+    int pending;
+    CountRows(out ready, out errors, out pending);
+    return pending;
 }
 
 private static void CountRows(out int ready, out int errors, out int pending)
@@ -2374,6 +2838,53 @@ private static void BrowseRootButton_Click(object sender, RoutedEventArgs e)
         ApplyUiConfig();
 }
 
+private static void Preview_Click(object sender, RoutedEventArgs e)
+{
+    if (_scanning)
+    {
+        MessageBox.Show("文件属性仍在读取中，请稍候。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+    RefreshPreviewNow();
+}
+
+private static void RefreshPreviewNow()
+{
+    if (_scanning || _config == null)
+        return;
+
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+
+    string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
+    int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
+    ReadConfigFromUi();
+    string newAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
+    if (newAlgorithm != NormalizeAlgorithm(oldAlgorithm))
+    {
+        int oldMax = GetAlgorithmMaxDigits(oldAlgorithm);
+        int newMax = GetAlgorithmMaxDigits(newAlgorithm);
+        if (oldDigits == oldMax)
+            _config["checksumDigits"] = newMax.ToString(CultureInfo.InvariantCulture);
+    }
+    NormalizeConfig(_config);
+
+    _suppressEvents = true;
+    SyncFallbackCombosFromConfig();
+    _suppressEvents = false;
+
+    UpdateChecksumBadge();
+    UpdateRootPathText();
+    UpdateFallbackUiState();
+    UpdateRealTimeUi();
+    if (!_digitsText.IsKeyboardFocusWithin)
+        _digitsText.Text = _config["checksumDigits"];
+
+    _previewDirty = false;
+    RefreshFilenameDates(true);
+}
+
 private static void LoadPreset_Click(object sender, RoutedEventArgs e)
 {
     if (_data == null)
@@ -2423,7 +2934,8 @@ private static void LoadPreset_Click(object sender, RoutedEventArgs e)
         _statusText.Text = "已载入预设，文件属性读取完成后刷新预览";
         return;
     }
-    RefreshFilenameDates();
+    _previewDirty = false;
+    RefreshFilenameDates(true);
     _statusText.Text = "已载入预设";
 }
 
@@ -2433,9 +2945,14 @@ private static void SavePreset_Click(object sender, RoutedEventArgs e)
         _debounceTimer.Stop();
     ReadConfigFromUi();
     NormalizeConfig(_config);
+    _suppressEvents = true;
+    SyncFallbackCombosFromConfig();
+    _suppressEvents = false;
     if (_data != null)
         _data["preset"] = BuildPresetDictionary(_config);
-    _statusText.Text = "预设已保存，将在窗口关闭后输出";
+    _statusText.Text = _previewDirty
+        ? "预设已保存；配置已变更，点击【预览】刷新目标路径"
+        : "预设已保存，将在窗口关闭后输出";
 }
 
 private static void Apply_Click(object sender, RoutedEventArgs e)
@@ -2447,12 +2964,10 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
         return;
     }
 
-    // 立即吸收尚未到防抖时间的文本修改，避免输出旧配置。
+    // 立即吸收尚未到防抖时间的文本修改，并刷新预览，避免输出旧配置。
     if (_debounceTimer != null)
         _debounceTimer.Stop();
-    ApplyUiConfig();
-
-    RecomputeAll();
+    RefreshPreviewNow();
 
     int ready;
     int errors;
@@ -2480,8 +2995,7 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
             return;
     }
 
-    List<object> originalPaths = new List<object>();
-    List<object> targetPaths = new List<object>();
+    List<string[]> pairs = new List<string[]>();
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
@@ -2490,8 +3004,22 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
         string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
         if (target == null || target.Length == 0)
             continue;
-        originalPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
-        targetPaths.Add(target);
+        string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
+        pairs.Add(new string[] { source, target });
+    }
+
+    List<object> originalPaths = new List<object>();
+    List<object> targetPaths = new List<object>();
+    for (int i = 0; i < pairs.Count; i++)
+    {
+        originalPaths.Add(pairs[i][0]);
+        targetPaths.Add(pairs[i][1]);
+    }
+    if (originalPaths.Count != targetPaths.Count)
+    {
+        MessageBox.Show("输出列表配对失败，请重试。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return;
     }
 
     if (_data != null)
@@ -2731,6 +3259,17 @@ private static void Window_Closed(object sender, EventArgs e)
     _progress = null;
     _browseRootButton = null;
     _applyButton = null;
+    _previewButton = null;
+    _realTimeCheck = null;
+    _fallbackEnabledCheck = null;
+    _fallback1Combo = null;
+    _fallback2Combo = null;
+    _fallback3Combo = null;
+    _fallback4Combo = null;
+    _missingModeCombo = null;
+    _missingText = null;
+    _errorBanner = null;
+    _errorBannerText = null;
     _rows = new ObservableCollection<Dictionary<string, object>>();
     _files = new List<Dictionary<string, object>>();
     _paths = new List<string>();

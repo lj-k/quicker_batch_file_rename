@@ -86,8 +86,10 @@ public static class TestHarness
             && date == new DateTime(2020, 2, 2), "filename date: letters around");
         Check(!CoreUnderTest.TryExtractFilenameDate("12020-02-02.jpg", 2000, out date),
             "filename date: reject leading digit");
-        Check(!CoreUnderTest.TryExtractFilenameDate("2020-02-021.jpg", 2000, out date),
-            "filename date: reject trailing digit");
+        Check(CoreUnderTest.TryExtractFilenameDate("2020-02-021.jpg", 2000, out date)
+            && date == new DateTime(2020, 2, 2), "filename date: allow trailing digit after dashed date");
+        Check(CoreUnderTest.TryExtractFilenameDate("202002021.jpg", 2000, out date)
+            && date == new DateTime(2020, 2, 2), "filename date: allow trailing digit after compact date");
         Check(!CoreUnderTest.TryExtractFilenameDate("1999-12-31.jpg", 2000, out date),
             "filename date: reject before start year");
         Check(!CoreUnderTest.TryExtractFilenameDate("2024-02-30.jpg", 2000, out date),
@@ -109,20 +111,24 @@ public static class TestHarness
     private static void TestChecksumBadge()
     {
         CheckEqual("[CRC32-7f7f7f7f]",
-            CoreUnderTest.BuildChecksumBadge("CRC32", 8, "", "", "7f7f7f7f"), "badge: CRC32 full");
+            CoreUnderTest.BuildChecksumBadge("CRC32", 8, "[", "]", "7f7f7f7f"), "badge: CRC32 full");
         CheckEqual("[CRC32_4-7f7f]",
-            CoreUnderTest.BuildChecksumBadge("CRC32", 4, "", "", "7f7f7f7f"), "badge: CRC32 truncated");
-        CheckEqual("[CHK:CRC32_4-7f7f:END]",
+            CoreUnderTest.BuildChecksumBadge("CRC32", 4, "[", "]", "7f7f7f7f"), "badge: CRC32 truncated");
+        CheckEqual("CHK:CRC32_4-7f7f:END",
             CoreUnderTest.BuildChecksumBadge("CRC32", 4, "CHK:", ":END", "7f7f7f7f"), "badge: prefix/suffix");
         CheckEqual("[SHA-256-" + new string('a', 64) + "]",
-            CoreUnderTest.BuildChecksumBadge("SHA256", 64, "", "", new string('a', 64)), "badge: SHA-256");
+            CoreUnderTest.BuildChecksumBadge("SHA256", 64, "[", "]", new string('a', 64)), "badge: SHA-256");
         CheckEqual("[MD5-" + new string('b', 32) + "]",
-            CoreUnderTest.BuildChecksumBadge("md5", 32, "", "", new string('b', 32)), "badge: MD5 lowercase input");
+            CoreUnderTest.BuildChecksumBadge("md5", 32, "[", "]", new string('b', 32)), "badge: MD5 lowercase input");
         CheckEqual("[BLAKE3-" + new string('c', 64) + "]",
-            CoreUnderTest.BuildChecksumBadge("BLAKE3", 64, "", "", new string('c', 64)), "badge: BLAKE3");
+            CoreUnderTest.BuildChecksumBadge("BLAKE3", 64, "[", "]", new string('c', 64)), "badge: BLAKE3");
         CheckEqual("7f7f", CoreUnderTest.TruncateHash("7f7f7f7f", 4), "truncate: head");
         CheckEqual("[CRC32-…]",
-            CoreUnderTest.BuildPendingChecksumBadge("CRC32", 8, "", ""), "badge: pending");
+            CoreUnderTest.BuildPendingChecksumBadge("CRC32", 8, "[", "]"), "badge: pending");
+        CheckEqual("CRC32",
+            CoreUnderTest.GetAlgorithmLabel("CRC32", 8), "badge: full length label omits digits");
+        CheckEqual("CRC32_4",
+            CoreUnderTest.GetAlgorithmLabel("CRC32", 4), "badge: truncated label includes digits");
     }
 
     private static void TestTemplateAndPath()
@@ -131,38 +137,49 @@ public static class TestHarness
         string error;
         string template = "【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】";
         bool ok = CoreUnderTest.TryBuildTargetPath(template, @"C:\A\B\C",
-            new DateTime(2020, 6, 15), "D", "TXT", "[CRC32_4-7f7f]", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "[CRC32_4-7f7f]", out target, out error);
         Check(ok, "path: example builds");
         CheckEqual(@"C:\A\B\C\2020.06\aaa\bbb\D-[CRC32_4-7f7f].TXT", target, "path: example result");
         if (!ok) Console.WriteLine("      error: " + error);
 
         ok = CoreUnderTest.TryBuildTargetPath("【源文件名】.【扩展名】", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", out target, out error);
         Check(ok && target == @"C:\A\D.TXT", "path: relative template gets root");
 
         ok = CoreUnderTest.TryBuildTargetPath("D:/Out/【源文件名】.【扩展名】", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", out target, out error);
         Check(ok && target == @"D:\Out\D.TXT", "path: absolute template ignores root");
 
         ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【源文件名】.txt", @"C:\A",
-            new DateTime(2020, 6, 15), "【日期yyyy】", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "【日期yyyy】", "TXT", "", out target, out error);
         Check(ok && target == @"C:\A\【日期yyyy】.txt", "path: token in value is not recursively replaced");
 
         ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【未知】.【扩展名】", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", out target, out error);
         Check(!ok && error != null && error.IndexOf("未知胶囊") >= 0, "path: unknown token rejected");
 
         ok = CoreUnderTest.TryBuildTargetPath("【根路径】/../D.TXT", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", out target, out error);
         Check(!ok, "path: parent segment rejected");
 
         ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【源文件名】.【扩展名】", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "", "", out target, out error);
         Check(!ok, "path: empty extension leaves trailing dot and fails");
 
         ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【源文件名】.【扩展名】", @"C:\A",
-            new DateTime(2020, 6, 15), "D", "TXT", "", out target, out error);
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", out target, out error);
         Check(ok && target == @"C:\A\D.TXT", "path: simple template");
+
+        Check(CoreUnderTest.DefaultTemplate.IndexOf("aaa/bbb", StringComparison.Ordinal) >= 0,
+            "path: default template contains aaa/bbb");
+
+        ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【日期yyyy】/【源文件名】.【扩展名】", @"C:\A",
+            null, "0000", "D", "TXT", "", out target, out error);
+        Check(ok && target == @"C:\A\0000\D.TXT", "path: missing date uses replacement text");
+
+        ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【源文件名】.【扩展名】", @"C:\A",
+            null, "", "D", "TXT", "", out target, out error);
+        Check(ok && target == @"C:\A\D.TXT", "path: missing date empty text is allowed");
 
         string normalized = CoreUnderTest.NormalizeTargetPath("C://A/B//C", "", out error);
         CheckEqual(@"C:\A\B\C", normalized, "path: collapse duplicate separators");
@@ -171,15 +188,85 @@ public static class TestHarness
         normalized = CoreUnderTest.NormalizeTargetPath("B/C.TXT", @"C:\A", out error);
         CheckEqual(@"C:\A\B\C.TXT", normalized, "path: combine root");
 
-        Check(CoreUnderTest.ValidateWindowsPath(@"C:\A\B.TXT", out error), "validate: normal drive path");
-        Check(CoreUnderTest.ValidateWindowsPath(@"\\server\share\B.TXT", out error), "validate: UNC path");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"\\server\share", out error), "validate: UNC without file");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"C:\A\..\B.TXT", out error), "validate: dot-dot");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"C:\A\B*.TXT", out error), "validate: wildcard");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"C:A\B.TXT", out error), "validate: drive-relative");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"C:\A\B.", out error), "validate: trailing dot");
-        Check(!CoreUnderTest.ValidateWindowsPath(@"C:\A\B ", out error), "validate: trailing space");
-        Check(CoreUnderTest.ValidateWindowsPath(@"C:\A\B", out error), "validate: path without extension is valid");
+        Check(CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B.TXT", out error), "validate: normal drive path");
+        Check(CoreUnderTest.ValidateCrossPlatformPath(@"\\server\share\B.TXT", out error), "validate: UNC path");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"\\server\share", out error), "validate: UNC without file");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\..\B.TXT", out error), "validate: dot-dot");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B*.TXT", out error), "validate: wildcard");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:A\B.TXT", out error), "validate: drive-relative");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B.", out error), "validate: trailing dot");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B ", out error), "validate: trailing space");
+        Check(CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B", out error), "validate: path without extension is valid");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B<C.TXT", out error)
+            && error.IndexOf("<") >= 0, "validate: cross-platform invalid char <");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B?C.TXT", out error)
+            && error.IndexOf("?") >= 0, "validate: cross-platform invalid char ?");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B:C.TXT", out error)
+            && error.IndexOf(":") >= 0, "validate: cross-platform invalid char :");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\CON.txt", out error)
+            && error.IndexOf("CON") >= 0, "validate: Windows reserved file name");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\LPT1\B.txt", out error)
+            && error.IndexOf("LPT1") >= 0, "validate: Windows reserved directory name");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\" + new string('a', 260), out error)
+            && error.IndexOf("255") >= 0, "validate: segment length limit");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\" + new string('中', 86) + ".txt", out error)
+            && error.IndexOf("255") >= 0, "validate: UTF-8 segment byte limit");
+        Check(!CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B" + ((char)1) + "C.TXT", out error),
+            "validate: control character");
+    }
+
+    private static void TestDateResolution()
+    {
+        Dictionary<string, DateTime?> dates = new Dictionary<string, DateTime?>();
+        dates["filename"] = null;
+        dates["exif"] = new DateTime(2020, 6, 15);
+        dates["modified"] = new DateTime(2021, 1, 1);
+        dates["created"] = new DateTime(2019, 1, 1);
+
+        DateTime? effective;
+        string source;
+        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "filename", true,
+            "filename,exif,modified,created", out effective, out source)
+            && effective == new DateTime(2020, 6, 15) && source == "exif",
+            "date resolve: fallback to exif");
+        Check(!CoreUnderTest.TryResolveEffectiveDate(dates, "filename", false,
+            "filename,exif,modified,created", out effective, out source),
+            "date resolve: fallback disabled returns missing");
+        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", false,
+            "filename,exif,modified,created", out effective, out source)
+            && effective == new DateTime(2020, 6, 15) && source == "exif",
+            "date resolve: primary wins");
+
+        dates["exif"] = null;
+        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", true,
+            "filename,exif,modified,created", out effective, out source)
+            && effective == new DateTime(2021, 1, 1) && source == "modified",
+            "date resolve: skips missing exif and finds modified");
+
+        dates["modified"] = null;
+        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", true,
+            "filename,exif,modified,created", out effective, out source)
+            && effective == new DateTime(2019, 1, 1) && source == "created",
+            "date resolve: falls back to created");
+
+        dates["exif"] = new DateTime(2020, 6, 15);
+        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "filename", true,
+            "exif,created", out effective, out source)
+            && effective == new DateTime(2020, 6, 15) && source == "exif",
+            "date resolve: custom fallback order");
+
+        CheckEqual("exif,created,filename,modified",
+            CoreUnderTest.NormalizeFallbackOrder("exif,exif,created"),
+            "date resolve: fallback order dedupe and fill");
+
+        Dictionary<string, DateTime?> empty = new Dictionary<string, DateTime?>();
+        empty["filename"] = null;
+        empty["exif"] = null;
+        empty["modified"] = null;
+        empty["created"] = null;
+        Check(!CoreUnderTest.TryResolveEffectiveDate(empty, "filename", true,
+            "filename,exif,modified,created", out effective, out source),
+            "date resolve: all missing returns false");
     }
 
     private static void TestPreset()
@@ -189,6 +276,11 @@ public static class TestHarness
         config["rootPath"] = @"D:\Out";
         config["startYear"] = "2010";
         config["dateSource"] = "exif";
+        config["dateFallbackEnabled"] = "false";
+        config["dateFallbackOrder"] = "exif,created";
+        config["dateMissingMode"] = "custom";
+        config["dateMissingText"] = "未知日期";
+        config["realTimePreview"] = "false";
         config["checksumAlgorithm"] = "SHA-256";
         config["checksumDigits"] = "16";
         config["checksumPrefix"] = "P";
@@ -196,9 +288,14 @@ public static class TestHarness
         config["template"] = "【根路径】/X-【校验码】.【扩展名】";
 
         Dictionary<string, object> preset = CoreUnderTest.BuildPresetDictionary(config);
-        Check(Convert.ToString(preset["presetVersion"]) == "0.01", "preset: version");
+        Check(Convert.ToString(preset["presetVersion"]) == "0.02", "preset: version");
         Check(Convert.ToString(preset["rootMode"]) == "custom", "preset: root mode");
         Check(Convert.ToString(preset["checksumDigits"]) == "16", "preset: digits");
+        Check(Convert.ToString(preset["dateFallbackEnabled"]) == "false", "preset: fallback flag");
+        Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,filename,modified", "preset: fallback order");
+        Check(Convert.ToString(preset["dateMissingMode"]) == "custom", "preset: missing mode");
+        Check(Convert.ToString(preset["dateMissingText"]) == "未知日期", "preset: missing text");
+        Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
 
         Dictionary<string, string> loaded = CoreUnderTest.CreateDefaultConfig(2000);
         bool applied = CoreUnderTest.ApplyPresetDictionary(preset, loaded);
@@ -206,11 +303,24 @@ public static class TestHarness
         CheckEqual(@"D:\Out", loaded["rootPath"], "preset: root path");
         CheckEqual("2010", loaded["startYear"], "preset: start year");
         CheckEqual("exif", loaded["dateSource"], "preset: date source");
+        CheckEqual("false", loaded["dateFallbackEnabled"], "preset: fallback roundtrip");
+        CheckEqual("exif,created,filename,modified", loaded["dateFallbackOrder"], "preset: order roundtrip");
+        CheckEqual("custom", loaded["dateMissingMode"], "preset: missing mode roundtrip");
+        CheckEqual("未知日期", loaded["dateMissingText"], "preset: missing text roundtrip");
+        CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
         CheckEqual("SHA-256", loaded["checksumAlgorithm"], "preset: algorithm");
         CheckEqual("16", loaded["checksumDigits"], "preset: digits roundtrip");
         CheckEqual("P", loaded["checksumPrefix"], "preset: prefix");
         CheckEqual("S", loaded["checksumSuffix"], "preset: suffix");
         CheckEqual("【根路径】/X-【校验码】.【扩展名】", loaded["template"], "preset: template");
+
+        Dictionary<string, string> defaults = CoreUnderTest.CreateDefaultConfig(2000);
+        CheckEqual("[", defaults["checksumPrefix"], "preset: default prefix is [");
+        CheckEqual("]", defaults["checksumSuffix"], "preset: default suffix is ]");
+        CheckEqual("true", defaults["dateFallbackEnabled"], "preset: default fallback enabled");
+        CheckEqual("filename,exif,modified,created", defaults["dateFallbackOrder"], "preset: default fallback order");
+        CheckEqual("empty", defaults["dateMissingMode"], "preset: default missing mode");
+        CheckEqual("true", defaults["realTimePreview"], "preset: default realtime");
 
         Dictionary<string, string> partial = CoreUnderTest.CreateDefaultConfig(2000);
         Dictionary<string, object> p2 = new Dictionary<string, object>();
@@ -238,6 +348,7 @@ public static class TestHarness
         TestFilenameDate();
         TestChecksumBadge();
         TestTemplateAndPath();
+        TestDateResolution();
         TestPreset();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);

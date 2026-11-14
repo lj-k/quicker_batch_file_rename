@@ -8,13 +8,13 @@ using System.Text.RegularExpressions;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.01
+// 版本：0.02
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
 // ============================================================================
 
-public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/【源文件名】-【校验码】.【扩展名】";
+public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】";
 
 public static readonly string[] SupportedAlgorithms = new string[] { "CRC32", "BLAKE3", "MD5", "SHA-256" };
 public static readonly string[] SupportedDateSources = new string[] { "filename", "exif", "modified", "created" };
@@ -24,9 +24,9 @@ public static readonly string[] TemplateTokens = new string[] {
 };
 
 private static readonly Regex FilenameDate1Regex =
-    new Regex(@"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    new Regex(@"(?<!\d)(\d{4})-(\d{2})-(\d{2})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 private static readonly Regex FilenameDate2Regex =
-    new Regex(@"(?<!\d)(\d{8})(?!\d)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    new Regex(@"(?<!\d)(\d{8})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 private static readonly Regex TemplateTokenRegex =
     new Regex("【[^】]*】", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -96,6 +96,68 @@ public static string NormalizeDateSource(string source)
     if (value == "created" || value == "创建日期")
         return "created";
     return "filename";
+}
+
+public static string NormalizeFallbackOrder(string order)
+{
+    List<string> result = new List<string>();
+    if (order != null)
+    {
+        string[] parts = order.Split(',');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            string part = parts[i] == null ? "" : parts[i].Trim();
+            if (part.Length == 0)
+                continue;
+            string normalized = NormalizeDateSource(part);
+            if (!result.Contains(normalized))
+                result.Add(normalized);
+        }
+    }
+    for (int i = 0; i < SupportedDateSources.Length; i++)
+    {
+        if (!result.Contains(SupportedDateSources[i]))
+            result.Add(SupportedDateSources[i]);
+    }
+    return string.Join(",", result.ToArray());
+}
+
+public static bool TryResolveEffectiveDate(IDictionary<string, DateTime?> dates,
+    string primarySource, bool fallbackEnabled, string fallbackOrder,
+    out DateTime? effectiveDate, out string effectiveSource)
+{
+    effectiveDate = null;
+    effectiveSource = "";
+
+    if (dates == null)
+        return false;
+
+    string primary = NormalizeDateSource(primarySource);
+    DateTime? value;
+    if (dates.TryGetValue(primary, out value) && value.HasValue)
+    {
+        effectiveDate = value;
+        effectiveSource = primary;
+        return true;
+    }
+
+    if (!fallbackEnabled)
+        return false;
+
+    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+    for (int i = 0; i < order.Length; i++)
+    {
+        string source = order[i];
+        if (source == primary)
+            continue;
+        if (dates.TryGetValue(source, out value) && value.HasValue)
+        {
+            effectiveDate = value;
+            effectiveSource = source;
+            return true;
+        }
+    }
+    return false;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -241,7 +303,7 @@ public static string BuildChecksumBadge(string algorithm, int digits, string pre
     string code = TruncateHash(hex, actualDigits);
     string left = (prefix == null ? "" : prefix);
     string right = (suffix == null ? "" : suffix);
-    return "[" + left + label + "-" + code + right + "]";
+    return left + label + "-" + code + right;
 }
 
 public static string BuildPendingChecksumBadge(string algorithm, int digits, string prefix, string suffix)
@@ -256,7 +318,7 @@ public static string BuildPendingChecksumBadge(string algorithm, int digits, str
     string label = GetAlgorithmLabel(value, actualDigits);
     string left = (prefix == null ? "" : prefix);
     string right = (suffix == null ? "" : suffix);
-    return "[" + left + label + "-…" + right + "]";
+    return left + label + "-…" + right;
 }
 
 public static string ComputeHashHex(string filePath, string algorithm, out string error)
@@ -658,8 +720,9 @@ public static string RenderTemplate(string template, IDictionary<string, string>
     return builder.ToString();
 }
 
-public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime effectiveDate,
-    string baseName, string extension, string checksumBadge, out string targetPath, out string error)
+public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime? effectiveDate,
+    string missingDateText, string baseName, string extension, string checksumBadge,
+    out string targetPath, out string error)
 {
     targetPath = null;
     error = null;
@@ -680,10 +743,26 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
         return false;
     }
 
+    string dateYear;
+    string dateMonth;
+    string dateDay;
+    if (effectiveDate.HasValue)
+    {
+        dateYear = effectiveDate.Value.ToString("yyyy", CultureInfo.InvariantCulture);
+        dateMonth = effectiveDate.Value.ToString("MM", CultureInfo.InvariantCulture);
+        dateDay = effectiveDate.Value.ToString("dd", CultureInfo.InvariantCulture);
+    }
+    else
+    {
+        dateYear = missingDateText == null ? "" : missingDateText;
+        dateMonth = dateYear;
+        dateDay = dateYear;
+    }
+
     Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.Ordinal);
-    values["【日期yyyy】"] = effectiveDate.ToString("yyyy", CultureInfo.InvariantCulture);
-    values["【日期mm】"] = effectiveDate.ToString("MM", CultureInfo.InvariantCulture);
-    values["【日期dd】"] = effectiveDate.ToString("dd", CultureInfo.InvariantCulture);
+    values["【日期yyyy】"] = dateYear;
+    values["【日期mm】"] = dateMonth;
+    values["【日期dd】"] = dateDay;
     values["【根路径】"] = rootDirectory == null ? "" : rootDirectory;
     values["【源文件名】"] = baseName == null ? "" : baseName;
     values["【扩展名】"] = extension == null ? "" : extension;
@@ -694,7 +773,7 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     if (normalized == null)
         return false;
 
-    if (!ValidateWindowsPath(normalized, out error))
+    if (!ValidateCrossPlatformPath(normalized, out error))
         return false;
 
     targetPath = normalized;
@@ -750,14 +829,19 @@ public static bool IsRootedWindowsPath(string path)
 {
     if (path == null || path.Length < 2)
         return false;
-    if (char.IsLetter(path[0]) && path[1] == ':')
+    if (IsAsciiDriveLetter(path[0]) && path[1] == ':')
         return true;
     if (path.Length >= 2 && path[0] == '\\' && path[1] == '\\')
         return true;
     return false;
 }
 
-public static bool ValidateWindowsPath(string path, out string error)
+private static bool IsAsciiDriveLetter(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+public static bool ValidateCrossPlatformPath(string path, out string error)
 {
     error = null;
     if (path == null || path.Trim().Length == 0)
@@ -765,24 +849,17 @@ public static bool ValidateWindowsPath(string path, out string error)
         error = "目标路径为空";
         return false;
     }
+
+    List<string> problems = new List<string>();
     if (path.IndexOf('/') >= 0)
-    {
-        error = "目标路径包含未规范化的斜杠";
-        return false;
-    }
+        problems.Add("目标路径包含未规范化的斜杠");
     if (path[path.Length - 1] == '\\')
-    {
-        error = "目标路径以目录分隔符结尾，缺少文件名";
-        return false;
-    }
+        problems.Add("目标路径以目录分隔符结尾，缺少文件名");
 
     bool isUnc = path.StartsWith("\\\\", StringComparison.Ordinal);
-    bool isDrive = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && path[2] == '\\';
+    bool isDrive = path.Length >= 3 && IsAsciiDriveLetter(path[0]) && path[1] == ':' && path[2] == '\\';
     if (!isUnc && !isDrive)
-    {
-        error = "目标路径不是绝对路径（应为 X:\\... 或 \\\\服务器\\共享\\...）";
-        return false;
-    }
+        problems.Add("目标路径不是绝对路径（应为 X:\\... 或 \\\\服务器\\共享\\...）");
 
     string[] segments = path.Split('\\');
     if (isUnc)
@@ -794,11 +871,15 @@ public static bool ValidateWindowsPath(string path, out string error)
                 nonEmptySegments++;
         }
         if (nonEmptySegments < 3)
-        {
-            error = "UNC 目标路径至少需要服务器、共享和文件名";
-            return false;
-        }
+            problems.Add("UNC 目标路径至少需要服务器、共享和文件名");
     }
+
+    StringBuilder invalidChars = new StringBuilder();
+    HashSet<string> reservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    bool hasDotSegment = false;
+    bool hasTrailingIssue = false;
+    bool hasSegmentLengthIssue = false;
+
     for (int i = 0; i < segments.Length; i++)
     {
         string segment = segments[i];
@@ -808,33 +889,91 @@ public static bool ValidateWindowsPath(string path, out string error)
             continue;
 
         if (segment == "." || segment == "..")
-        {
-            error = "目标路径不能包含 . 或 .. 目录段";
-            return false;
-        }
+            hasDotSegment = true;
+
         if (segment[segment.Length - 1] == ' ' || segment[segment.Length - 1] == '.')
-        {
-            error = "路径段不能以空格或点结尾：" + segment;
-            return false;
-        }
+            hasTrailingIssue = true;
+
+        if (segment.Length > 255 || Encoding.UTF8.GetByteCount(segment) > 255)
+            hasSegmentLengthIssue = true;
+
         for (int j = 0; j < segment.Length; j++)
         {
             char c = segment[j];
-            if (c < 32 || c == '<' || c == '>' || c == ':' || c == '"' || c == '|' || c == '?' || c == '*')
+            if (IsCrossPlatformInvalidChar(c))
             {
-                error = "路径段包含非法字符：" + segment;
-                return false;
+                if (invalidChars.ToString().IndexOf(c) < 0)
+                    invalidChars.Append(c);
             }
         }
+
+        string reserved = GetReservedDeviceName(segment);
+        if (reserved != null)
+            reservedNames.Add(reserved);
     }
+
+    if (hasDotSegment)
+        problems.Add("目标路径不能包含 . 或 .. 目录段");
+    if (hasTrailingIssue)
+        problems.Add("路径段不能以空格或点结尾");
+    if (hasSegmentLengthIssue)
+        problems.Add("存在路径段超过255字符或255字节");
+    if (invalidChars.Length > 0)
+        problems.Add("路径段包含跨平台非法字符：" + invalidChars.ToString());
+    if (reservedNames.Count > 0)
+    {
+        string[] names = new string[reservedNames.Count];
+        reservedNames.CopyTo(names);
+        problems.Add("路径段包含Windows保留设备名：" + string.Join("、", names));
+    }
+    if (path.Length > 259)
+        problems.Add("总路径超过Windows 259字符限制");
+    if (Encoding.UTF8.GetByteCount(path) > 1024)
+        problems.Add("总路径超过macOS 1024字节限制");
 
     string fileName = GetLastPathSegment(path);
     if (fileName == null || fileName.Length == 0)
+        problems.Add("目标路径缺少文件名");
+
+    if (problems.Count > 0)
     {
-        error = "目标路径缺少文件名";
+        error = string.Join("；", problems.ToArray());
         return false;
     }
     return true;
+}
+
+private static bool IsCrossPlatformInvalidChar(char c)
+{
+    if (c < 32)
+        return true;
+    return c == '<' || c == '>' || c == ':' || c == '"' ||
+           c == '|' || c == '?' || c == '*';
+}
+
+private static string GetReservedDeviceName(string segment)
+{
+    if (segment == null || segment.Length == 0)
+        return null;
+
+    int dot = segment.IndexOf('.');
+    string baseName = (dot >= 0 ? segment.Substring(0, dot) : segment).Trim();
+    if (baseName.Length == 0)
+        return null;
+    string upper = baseName.ToUpperInvariant();
+
+    if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+        upper == "CLOCK$" || upper == "CONIN$" || upper == "CONOUT$")
+        return baseName;
+
+    if (upper.Length == 4)
+    {
+        string prefix = upper.Substring(0, 3);
+        char number = upper[3];
+        if ((prefix == "COM" || prefix == "LPT") && number >= '0' && number <= '9')
+            return baseName;
+    }
+    return null;
 }
 
 public static string GetLastPathSegment(string path)
@@ -861,10 +1000,15 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["rootPath"] = "";
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
     config["dateSource"] = "filename";
+    config["dateFallbackEnabled"] = "true";
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(null);
+    config["dateMissingMode"] = "empty";
+    config["dateMissingText"] = "";
+    config["realTimePreview"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
-    config["checksumPrefix"] = "";
-    config["checksumSuffix"] = "";
+    config["checksumPrefix"] = "[";
+    config["checksumSuffix"] = "]";
     config["template"] = DefaultTemplate;
     return config;
 }
@@ -892,6 +1036,22 @@ public static string GetConfigString(Dictionary<string, string> config, string k
     return value;
 }
 
+public static bool GetConfigBool(Dictionary<string, string> config, string key, bool defaultValue)
+{
+    string value = GetConfigString(config, key, null);
+    if (value == null)
+        return defaultValue;
+    value = value.Trim().ToLowerInvariant();
+    if (value == "true" || value == "1" || value == "yes" || value == "是")
+        return true;
+    if (value == "false" || value == "0" || value == "no" || value == "否")
+        return false;
+    bool result;
+    if (bool.TryParse(value, out result))
+        return result;
+    return defaultValue;
+}
+
 public static void NormalizeConfig(Dictionary<string, string> config)
 {
     if (config == null)
@@ -907,6 +1067,12 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
 
     config["dateSource"] = NormalizeDateSource(GetConfigString(config, "dateSource", "filename"));
+    config["dateFallbackEnabled"] = GetConfigBool(config, "dateFallbackEnabled", true) ? "true" : "false";
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(GetConfigString(config, "dateFallbackOrder", ""));
+    string missingMode = (GetConfigString(config, "dateMissingMode", "empty") ?? "").Trim().ToLowerInvariant();
+    config["dateMissingMode"] = missingMode == "custom" ? "custom" : "empty";
+    config["dateMissingText"] = GetConfigString(config, "dateMissingText", "");
+    config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
     if (!IsSupportedAlgorithm(algorithm))
@@ -921,8 +1087,8 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     if (digits > maxDigits) digits = maxDigits;
     config["checksumDigits"] = digits.ToString(CultureInfo.InvariantCulture);
 
-    config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "");
-    config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "");
+    config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "[");
+    config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "]");
 
     string template = GetConfigString(config, "template", DefaultTemplate);
     if (template == null)
@@ -935,11 +1101,16 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.01";
+    preset["presetVersion"] = "0.02";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
     preset["dateSource"] = normalized["dateSource"];
+    preset["dateFallbackEnabled"] = normalized["dateFallbackEnabled"];
+    preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
+    preset["dateMissingMode"] = normalized["dateMissingMode"];
+    preset["dateMissingText"] = normalized["dateMissingText"];
+    preset["realTimePreview"] = normalized["realTimePreview"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
     preset["checksumPrefix"] = normalized["checksumPrefix"];
@@ -955,8 +1126,10 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
     bool applied = false;
     string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear", "dateSource", "checksumAlgorithm",
-        "checksumDigits", "checksumPrefix", "checksumSuffix", "template"
+        "rootMode", "rootPath", "startYear", "dateSource",
+        "dateFallbackEnabled", "dateFallbackOrder", "dateMissingMode", "dateMissingText",
+        "realTimePreview", "checksumAlgorithm", "checksumDigits",
+        "checksumPrefix", "checksumSuffix", "template"
     };
     for (int i = 0; i < keys.Length; i++)
     {
