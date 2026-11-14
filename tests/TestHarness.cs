@@ -285,6 +285,59 @@ public static class TestHarness
         CheckEqual("skip,custom,empty,filename,created",
             CoreUnderTest.NormalizeFallbackOrder("跳过,自定义,空值,文件名,创建"),
             "date resolve: special tokens and aliases");
+
+        Dictionary<string, DateTime?> conflictDates = new Dictionary<string, DateTime?>();
+        conflictDates["filename"] = new DateTime(2020, 1, 2);
+        conflictDates["exif"] = new DateTime(2020, 6, 15, 10, 30, 0);
+        conflictDates["modified"] = new DateTime(2021, 1, 1);
+        conflictDates["created"] = new DateTime(2019, 1, 1);
+
+        CoreUnderTest.ResolveDateValue(conflictDates, "filename",
+            "filename,exif,modified,created,empty", "", false,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 1, 2) && source == "filename",
+            "date resolve: filename kept when prefer-exif off");
+
+        CoreUnderTest.ResolveDateValue(conflictDates, "filename",
+            "filename,exif,modified,created,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15, 10, 30, 0) && source == "exif",
+            "date resolve: prefer exif on filename conflict");
+
+        CoreUnderTest.ResolveDateValue(conflictDates, "modified",
+            "filename,exif,modified,created,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2021, 1, 1) && source == "modified",
+            "date resolve: prefer-exif does not override other primary source");
+
+        Dictionary<string, DateTime?> sameDate = new Dictionary<string, DateTime?>();
+        sameDate["filename"] = new DateTime(2020, 6, 15);
+        sameDate["exif"] = new DateTime(2020, 6, 15, 23, 59, 0);
+        sameDate["modified"] = null;
+        sameDate["created"] = null;
+        CoreUnderTest.ResolveDateValue(sameDate, "filename",
+            "filename,exif,modified,created,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15) && source == "filename",
+            "date resolve: same calendar date is not a conflict");
+
+        Dictionary<string, DateTime?> fallbackConflict = new Dictionary<string, DateTime?>();
+        fallbackConflict["filename"] = new DateTime(2020, 1, 2);
+        fallbackConflict["exif"] = new DateTime(2020, 6, 15);
+        fallbackConflict["modified"] = null;
+        fallbackConflict["created"] = null;
+        CoreUnderTest.ResolveDateValue(fallbackConflict, "modified",
+            "filename,exif,empty,empty,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15) && source == "exif",
+            "date resolve: prefer exif when filename is fallback");
+
+        conflictDates["exif"] = null;
+        CoreUnderTest.ResolveDateValue(conflictDates, "filename",
+            "filename,exif,modified,created,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 1, 2) && source == "filename",
+            "date resolve: keep filename when exif missing");
     }
 
     private static void TestFilter()
@@ -450,6 +503,7 @@ public static class TestHarness
         config["dateSource"] = "exif";
         config["dateFallbackOrder"] = "exif,created,custom,empty,skip";
         config["dateFallbackCustomText"] = "兜底日期";
+        config["preferExifOnFilenameConflict"] = "true";
         config["realTimePreview"] = "false";
         config["execParallel"] = "5";
         config["execVerify"] = "false";
@@ -467,6 +521,7 @@ public static class TestHarness
         Check(Convert.ToString(preset["filterMode"]) == "move", "preset: filter mode");
         Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,custom,empty,skip", "preset: fallback order");
         Check(Convert.ToString(preset["dateFallbackCustomText"]) == "兜底日期", "preset: fallback custom text");
+        Check(Convert.ToString(preset["preferExifOnFilenameConflict"]) == "true", "preset: prefer exif flag");
         Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
         Check(Convert.ToString(preset["execParallel"]) == "5", "preset: exec parallel");
         Check(Convert.ToString(preset["execVerify"]) == "false", "preset: exec verify");
@@ -481,6 +536,7 @@ public static class TestHarness
         CheckEqual("move", loaded["filterMode"], "preset: filter mode roundtrip");
         CheckEqual("exif,created,custom,empty,skip", loaded["dateFallbackOrder"], "preset: order roundtrip");
         CheckEqual("兜底日期", loaded["dateFallbackCustomText"], "preset: fallback custom roundtrip");
+        CheckEqual("true", loaded["preferExifOnFilenameConflict"], "preset: prefer exif roundtrip");
         CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
         CheckEqual("5", loaded["execParallel"], "preset: exec parallel roundtrip");
         CheckEqual("false", loaded["execVerify"], "preset: exec verify roundtrip");
@@ -497,6 +553,7 @@ public static class TestHarness
         CheckEqual("skip", defaults["filterMode"], "preset: default filter mode");
         CheckEqual("filename,exif,modified,created,empty", defaults["dateFallbackOrder"], "preset: default fallback order");
         CheckEqual("", defaults["dateFallbackCustomText"], "preset: default fallback custom empty");
+        CheckEqual("false", defaults["preferExifOnFilenameConflict"], "preset: default prefer exif off");
         CheckEqual("true", defaults["realTimePreview"], "preset: default realtime");
         CheckEqual("2", defaults["execParallel"], "preset: default exec parallel");
         CheckEqual("true", defaults["execVerify"], "preset: default exec verify");

@@ -44,7 +44,7 @@ check(not missing, "all code-referenced names exist in XAML" + ("" if not missin
 
 required = {
     "RootModeCombo", "RootPathText", "BrowseRootButton", "StartYearCombo", "DateSourceCombo",
-    "RealTimeCheck", "BtnPreview",
+    "PreferExifCheck", "RealTimeCheck", "BtnPreview",
     "FilterCardTitle", "FilterExtensionsText", "FilterModeCombo", "BtnLoadExtPreset", "BtnSaveExtPreset",
     "Fallback1Combo", "Fallback2Combo", "Fallback3Combo", "Fallback4Combo", "Fallback5Combo",
     "FallbackCustomText", "ErrorBanner", "ErrorBannerText",
@@ -75,7 +75,7 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.3", "deployed code version is 0.06.3")
+check(dist_text.splitlines()[1] == "// 版本：0.06.4", "deployed code version is 0.06.4")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
@@ -83,6 +83,8 @@ check("PrimePresetVariables" in dist_text, "deployed code primes preset variable
 check("NormalizePresetVariable" in dist_text, "deployed code normalizes JSON preset state")
 check("TryParseJson" in dist_text, "deployed code parses JSON preset state")
 check("FindVariableMethod" in dist_text, "deployed code resolves interface variable methods")
+check("preferExifOnFilenameConflict" in dist_text, "deployed code contains exif conflict option")
+check("PreferExifCheck_Changed" in dist_text, "deployed code handles exif conflict toggle")
 check("ExecuteOneFile" in dist_text, "deployed code contains execution worker")
 check("CopyFileAdaptive" in dist_text, "deployed code contains adaptive transfer engine")
 check("DeliveryMode" in dist_text, "deployed code contains delivery mode")
@@ -90,14 +92,15 @@ check("Finish_Click" in dist_text, "deployed code contains finish handler")
 check('"actions"' in dist_text, "deployed code outputs action list")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.3" in core_text, "core source version is 0.06.3")
+check("// 版本：0.06.4" in core_text, "core source version is 0.06.4")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
+check("preferExifOnFilenameConflict" in core_text, "core contains exif conflict config")
 check("ShouldSkipByFilter" in core_text, "core contains filter decision")
 check("ResolveAction" in core_text, "core contains action resolution")
 check("CopyFileWithRetry" in core_text, "core contains copy retry engine")
 check("SelectCopyBufferSizeForDrive" in core_text, "core contains drive buffer profile")
-check('// 版本：0.06.3' in aux_text, "aux source version is 0.06.3")
-check("XAML 版本：0.06.3" in xaml_text, "XAML version is 0.06.3")
+check('// 版本：0.06.4' in aux_text, "aux source version is 0.06.4")
+check("XAML 版本：0.06.4" in xaml_text, "XAML version is 0.06.4")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -120,8 +123,8 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.11" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.11")
+check("> 版本：0.0.12" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.12")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
@@ -130,8 +133,8 @@ check("预设变量直接赋值" in req_text, "requirements includes direct pres
 check("winContext.Context.SetVarValue" in req_text, "requirements includes direct SetVarValue")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.3"),
-    ("doc/测试报告.md", "0.06.3"),
+    ("doc/开发说明.md", "0.06.4"),
+    ("doc/测试报告.md", "0.06.4"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -143,7 +146,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.3]" in changelog_text, "CHANGELOG has 0.06.3 entry")
+    check("[0.06.4]" in changelog_text, "CHANGELOG has 0.06.4 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -162,8 +165,8 @@ s2 = release / "方案2-执行不输出列表"
 for folder in [s1, s2]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.3",
-          str(folder.name) + " Aux version 0.06.3")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.4",
+          str(folder.name) + " Aux version 0.06.4")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

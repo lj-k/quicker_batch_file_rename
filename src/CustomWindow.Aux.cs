@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.3
+// 版本：0.06.4
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -48,6 +48,7 @@ private static TextBox _suffixText;
 private static ComboBox _rootModeCombo;
 private static ComboBox _startYearCombo;
 private static ComboBox _dateSourceCombo;
+private static CheckBox _preferExifCheck;
 private static ComboBox _algorithmCombo;
 private static TextBlock _checksumBadge;
 private static TextBlock _statusText;
@@ -207,6 +208,7 @@ private static void FindControls(Window win)
     _rootModeCombo = (ComboBox)win.FindName("RootModeCombo");
     _startYearCombo = (ComboBox)win.FindName("StartYearCombo");
     _dateSourceCombo = (ComboBox)win.FindName("DateSourceCombo");
+    _preferExifCheck = (CheckBox)win.FindName("PreferExifCheck");
     _algorithmCombo = (ComboBox)win.FindName("AlgorithmCombo");
     _checksumBadge = (TextBlock)win.FindName("ChecksumBadge");
     _statusText = (TextBlock)win.FindName("StatusText");
@@ -310,6 +312,8 @@ private static void AttachEvents(Window win)
     _rootModeCombo.SelectionChanged += RootModeCombo_SelectionChanged;
     _startYearCombo.SelectionChanged += StartYearCombo_SelectionChanged;
     _dateSourceCombo.SelectionChanged += DateSourceCombo_SelectionChanged;
+    _preferExifCheck.Checked += PreferExifCheck_Changed;
+    _preferExifCheck.Unchecked += PreferExifCheck_Changed;
     _algorithmCombo.SelectionChanged += AlgorithmCombo_SelectionChanged;
     _realTimeCheck.Checked += RealTimeCheck_Changed;
     _realTimeCheck.Unchecked += RealTimeCheck_Changed;
@@ -375,6 +379,7 @@ private static void AttachToolTips()
     SetTip(_browseRootButton, "选择固定根目录。\n选择“其他文件夹”时也会自动弹出此选择器；取消且没有历史目录时会回到“当前文件夹”。");
     SetTip(_startYearCombo, "文件名日期允许的最早起始年份，默认2000。\n修改后会重新提取所有文件的【文件名中的日期】，并刷新目标路径预览。");
     SetTip(_dateSourceCombo, "主选日期来源，默认“文件名中的日期”。\n该日期用于【日期yyyy】【日期mm】【日期dd】。\n主选缺失时按递补1→5依次处理。");
+    SetTip(_preferExifCheck, "文件名日期与EXIF拍摄日期都可用、但日历日期不同时，输出EXIF拍摄日期。\n用于避免文件名中的日期识别错误；只有文件名日期参与生效日期时才覆盖。\n默认关闭；开启后会立即刷新预览。");
     SetTip(_filterExtensionsText, "过滤器扩展名列表。\n支持分号、逗号、空格、换行分隔；可写 jpg 或 .jpg。\n空列表表示不过滤。\n决策模式为跳过时作为排除名单；为复制/移动/重命名时作为白名单。");
     SetTip(_filterModeCombo, "过滤器决策模式。\n跳过：命中扩展名的文件跳过，其余文件按模板执行（同目录为重命名，跨目录为复制）。\n复制/移动/重命名：仅命中扩展名的文件按该动作执行，其余文件跳过；空列表表示不过滤。\n重命名模式下若模板加入中间文件夹，动作会自动变为复制。");
     SetTip(_loadExtPresetButton, "从动作词典【扩展名预设】载入扩展名列表。\n选择预设后可覆盖当前列表或追加到当前列表。");
@@ -462,6 +467,7 @@ private static void SyncUiFromConfig()
     SelectComboByTag(_rootModeCombo, _config["rootMode"]);
     SelectStartYear(GetConfigInt(_config, "startYear", 2000));
     SelectComboByTag(_dateSourceCombo, _config["dateSource"]);
+    _preferExifCheck.IsChecked = GetConfigBool(_config, "preferExifOnFilenameConflict", false);
     SelectComboByTag(_algorithmCombo, _config["checksumAlgorithm"]);
     _realTimeCheck.IsChecked = GetConfigBool(_config, "realTimePreview", true);
     _filterExtensionsText.Text = _config["filterExtensions"];
@@ -584,6 +590,7 @@ private static void ReadConfigFromUi()
     _config["dateSource"] = GetComboTag(_dateSourceCombo) ?? "filename";
     _config["dateFallbackOrder"] = GetFallbackOrderFromUi();
     _config["dateFallbackCustomText"] = _fallbackCustomText.Text == null ? "" : _fallbackCustomText.Text;
+    _config["preferExifOnFilenameConflict"] = _preferExifCheck.IsChecked == true ? "true" : "false";
     _config["realTimePreview"] = _realTimeCheck.IsChecked == true ? "true" : "false";
     _config["execParallel"] = GetComboTag(_execParallelCombo) ?? "2";
     _config["execVerify"] = _execVerifyCheck != null && _execVerifyCheck.IsChecked == true ? "true" : "false";
@@ -663,6 +670,12 @@ private static void StartYearCombo_SelectionChanged(object sender, SelectionChan
 }
 
 private static void DateSourceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void PreferExifCheck_Changed(object sender, RoutedEventArgs e)
 {
     if (_suppressEvents) return;
     ApplyUiConfig();
@@ -791,6 +804,7 @@ private static void ApplyUiConfig()
     string oldDateSource = GetConfigString(_config, "dateSource", "filename");
     string oldFallbackOrder = GetConfigString(_config, "dateFallbackOrder", "");
     string oldFallbackCustom = GetConfigString(_config, "dateFallbackCustomText", "");
+    string oldPreferExif = GetConfigString(_config, "preferExifOnFilenameConflict", "false");
     string oldRealTime = GetConfigString(_config, "realTimePreview", "true");
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
@@ -838,6 +852,7 @@ private static void ApplyUiConfig()
     bool dateChanged = (oldDateSource != _config["dateSource"]);
     bool fallbackChanged = (NormalizeFallbackOrder(oldFallbackOrder) != _config["dateFallbackOrder"] ||
         oldFallbackCustom != _config["dateFallbackCustomText"]);
+    bool preferExifChanged = (oldPreferExif != _config["preferExifOnFilenameConflict"]);
 
     if (realTimeChanged && realTime)
     {
@@ -858,7 +873,7 @@ private static void ApplyUiConfig()
         _previewDirty = true;
         if (startChanged)
             RefreshFilenameDates(false);
-        else if (dateChanged || fallbackChanged)
+        else if (dateChanged || fallbackChanged || preferExifChanged)
             RefreshEffectiveDates(false);
         RefreshErrorBanner("");
         UpdateStatus();
@@ -868,7 +883,7 @@ private static void ApplyUiConfig()
     _previewDirty = false;
     if (startChanged)
         RefreshFilenameDates(true);
-    else if (dateChanged || fallbackChanged)
+    else if (dateChanged || fallbackChanged || preferExifChanged)
         RefreshEffectiveDates(true);
     else
         RecomputeAll();
@@ -935,8 +950,9 @@ private static void UpdateEffectiveDate(Dictionary<string, object> item)
     string missingText;
     bool skipped;
     ResolveDateValue(dates, _config["dateSource"], _config["dateFallbackOrder"],
-        _config["dateFallbackCustomText"], out effectiveDate, out effectiveSource,
-        out missingText, out skipped);
+        _config["dateFallbackCustomText"],
+        GetConfigBool(_config, "preferExifOnFilenameConflict", false),
+        out effectiveDate, out effectiveSource, out missingText, out skipped);
 
     item["EffectiveDate"] = effectiveDate;
     item["EffectiveSource"] = effectiveSource == null ? "" : effectiveSource;
@@ -2632,6 +2648,7 @@ private static string BuildPresetDiff(Dictionary<string, string> oldConfig,
         "rootMode", "rootPath", "startYear",
         "filterExtensions", "filterMode",
         "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
+        "preferExifOnFilenameConflict",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
         "checksumPrefix", "checksumSuffix", "template"
     };
@@ -2660,6 +2677,7 @@ private static string GetConfigLabel(string key)
     if (key == "dateSource") return "日期来源";
     if (key == "dateFallbackOrder") return "递补顺序";
     if (key == "dateFallbackCustomText") return "递补自定义值";
+    if (key == "preferExifOnFilenameConflict") return "文件名日期与EXIF不一致时用EXIF";
     if (key == "realTimePreview") return "实时刷新";
     if (key == "checksumAlgorithm") return "校验算法";
     if (key == "checksumDigits") return "校验位数";
@@ -2680,6 +2698,8 @@ private static string FormatPresetValue(string key, string value)
     if (key == "filterMode")
         return value == "execute" ? "匹配时执行（白名单）" : "匹配时跳过";
     if (key == "realTimePreview")
+        return value == "true" ? "开启" : "关闭";
+    if (key == "preferExifOnFilenameConflict")
         return value == "true" ? "开启" : "关闭";
     if (key == "dateFallbackOrder")
         return FormatDateOrder(value);

@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.3 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.4 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -320,6 +320,12 @@
                                 </ComboBox>
                                 <TextBlock Text="最早起始年份" Style="{StaticResource FieldLabel}"/>
                                 <ComboBox x:Name="StartYearCombo" Width="90" Style="{StaticResource FieldCombo}"/>
+                            </WrapPanel>
+                            <WrapPanel Margin="0,8,0,0">
+                                <CheckBox x:Name="PreferExifCheck"
+                                          Content="文件名日期与EXIF不一致时用EXIF"
+                                          VerticalAlignment="Center"
+                                          Margin="0,0,12,0"/>
                             </WrapPanel>
                             <WrapPanel Margin="0,8,0,0">
                                 <TextBlock Text="递补" Style="{StaticResource FieldLabel}"/>

@@ -10,7 +10,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.3
+// 版本：0.06.4
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -164,6 +164,16 @@ public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
     out DateTime? effectiveDate, out string effectiveSource,
     out string missingText, out bool skipped)
 {
+    ResolveDateValue(dates, primarySource, fallbackOrder, customText, false,
+        out effectiveDate, out effectiveSource, out missingText, out skipped);
+}
+
+public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
+    string primarySource, string fallbackOrder, string customText,
+    bool preferExifOnFilenameConflict,
+    out DateTime? effectiveDate, out string effectiveSource,
+    out string missingText, out bool skipped)
+{
     effectiveDate = null;
     effectiveSource = "";
     missingText = "";
@@ -172,9 +182,26 @@ public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
     if (dates != null)
     {
         string primary = NormalizeDateSource(primarySource);
+        DateTime? filenameDate = null;
+        DateTime? exifDate = null;
+        bool hasFilenameExifConflict = false;
+        if (preferExifOnFilenameConflict &&
+            dates.TryGetValue("filename", out filenameDate) && filenameDate.HasValue &&
+            dates.TryGetValue("exif", out exifDate) && exifDate.HasValue &&
+            filenameDate.Value.Date != exifDate.Value.Date)
+        {
+            hasFilenameExifConflict = true;
+        }
+
         DateTime? value;
         if (dates.TryGetValue(primary, out value) && value.HasValue)
         {
+            if (primary == "filename" && hasFilenameExifConflict)
+            {
+                effectiveDate = exifDate;
+                effectiveSource = "exif";
+                return;
+            }
             effectiveDate = value;
             effectiveSource = primary;
             return;
@@ -203,6 +230,12 @@ public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
             }
             if (dates.TryGetValue(token, out value) && value.HasValue)
             {
+                if (token == "filename" && hasFilenameExifConflict)
+                {
+                    effectiveDate = exifDate;
+                    effectiveSource = "exif";
+                    return;
+                }
                 effectiveDate = value;
                 effectiveSource = token;
                 return;
@@ -1753,6 +1786,7 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateSource"] = "filename";
     config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
     config["dateFallbackCustomText"] = "";
+    config["preferExifOnFilenameConflict"] = "false";
     config["realTimePreview"] = "true";
     config["execParallel"] = "2";
     config["execVerify"] = "true";
@@ -1835,6 +1869,8 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["dateFallbackOrder"] = NormalizeFallbackOrder(rawOrder);
     string customText = GetConfigString(config, "dateFallbackCustomText", oldFallback5);
     config["dateFallbackCustomText"] = customText == null ? "" : customText;
+    config["preferExifOnFilenameConflict"] =
+        GetConfigBool(config, "preferExifOnFilenameConflict", false) ? "true" : "false";
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
     config["execParallel"] = NormalizeParallelCount(GetConfigInt(config, "execParallel", 2)).ToString(CultureInfo.InvariantCulture);
     config["execVerify"] = GetConfigBool(config, "execVerify", true) ? "true" : "false";
@@ -1875,6 +1911,7 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     preset["dateSource"] = normalized["dateSource"];
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
     preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
+    preset["preferExifOnFilenameConflict"] = normalized["preferExifOnFilenameConflict"];
     preset["realTimePreview"] = normalized["realTimePreview"];
     preset["execParallel"] = normalized["execParallel"];
     preset["execVerify"] = normalized["execVerify"];
@@ -1898,6 +1935,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
         "filterExtensions", "filterMode",
         "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
         "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
+        "preferExifOnFilenameConflict",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
         "execParallel", "execVerify",
         "checksumPrefix", "checksumSuffix", "template"
