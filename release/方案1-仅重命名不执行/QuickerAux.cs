@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.18
+// 版本：0.06.19
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.18
+// 版本：0.06.19
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -2981,7 +2981,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.18
+// 版本：0.06.19
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -3035,6 +3035,10 @@ private static CheckBox _realTimeCheck;
 private static CheckBox _realTimeSelectionCheck;
 private static DispatcherTimer _selectionDebounceTimer;
 private static DispatcherTimer _selectionFallbackTimer;
+private static DispatcherTimer _selectionGuardTimer;
+private static DispatcherTimer _selectionApplyTimer;
+private static List<string> _pendingSelectionDiff;
+private static int _layoutWorkerCount = 0;
 private static string _lastSelectionKey = "";
 private static IntPtr _selectionHook = IntPtr.Zero;
 private static WinEventDelegate _selectionHookDelegate;
@@ -3066,6 +3070,8 @@ private static ObservableCollection<Dictionary<string, object>> _rows =
 private static List<Dictionary<string, object>> _files = new List<Dictionary<string, object>>();
 private static List<string> _paths = new List<string>();
 private static HashSet<string> _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+private static HashSet<string> _loadedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+private static IntPtr _lastExplorerWindow = IntPtr.Zero;
 private static Dictionary<string, string> _config = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 private static Dictionary<string, string> _hashCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -3347,6 +3353,8 @@ private static void ResetRuntimeState()
     _files = new List<Dictionary<string, object>>();
     _paths = new List<string>();
     _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _loadedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _lastExplorerWindow = IntPtr.Zero;
     _hashCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     _scanning = false;
     _hashStop = false;
@@ -3502,6 +3510,7 @@ private static void AttachEvents(Window win)
 
     win.PreviewMouseLeftButtonDown += Window_PreviewMouseDown;
     win.Deactivated += Window_Deactivated;
+    win.Activated += Window_Activated;
 
     AttachClick("BtnTokenYyyy", TokenButton_Click);
     AttachClick("BtnTokenMm", TokenButton_Click);
@@ -3857,6 +3866,28 @@ private static void Window_Deactivated(object sender, EventArgs e)
     CloseHeaderFilterPopup();
 }
 
+// 守门员：窗口重新获得焦点后，再核对一次输入与资源管理器选中项是否一致。
+private static void Window_Activated(object sender, EventArgs e)
+{
+    if (!IsRealTimeSelectionEnabled() || _executing || _lastExplorerWindow == IntPtr.Zero)
+        return;
+    if (_selectionGuardTimer == null)
+    {
+        _selectionGuardTimer = new DispatcherTimer();
+        _selectionGuardTimer.Interval = TimeSpan.FromMilliseconds(250);
+        _selectionGuardTimer.Tick += delegate(object timerSender, EventArgs timerArgs)
+        {
+            if (_selectionGuardTimer != null)
+                _selectionGuardTimer.Stop();
+            if (IsRealTimeSelectionEnabled() && !_executing && _window != null &&
+                _window.IsActive)
+                ApplyRealTimeSelection(true);
+        };
+    }
+    _selectionGuardTimer.Stop();
+    _selectionGuardTimer.Start();
+}
+
 private static void HeaderFilterPopup_KeyDown(object sender, KeyEventArgs e)
 {
     if (e.Key != Key.Escape)
@@ -3906,6 +3937,23 @@ private static void PreviewGrid_Sorting(object sender, DataGridSortingEventArgs 
     }
     e.Column.SortDirection = direction;
     SortPreviewRows(key, direction);
+}
+
+// 增量追加/删除后恢复用户当前表头排序，避免新行总是落到末尾。
+private static void ReapplyActiveSort()
+{
+    if (_grid == null)
+        return;
+    for (int i = 0; i < _grid.Columns.Count; i++)
+    {
+        DataGridColumn column = _grid.Columns[i];
+        if (column.SortDirection.HasValue &&
+            column.SortMemberPath != null && column.SortMemberPath.Length > 0)
+        {
+            SortPreviewRows(column.SortMemberPath, column.SortDirection.Value);
+            return;
+        }
+    }
 }
 
 private static void SortPreviewRows(string key, ListSortDirection direction)
@@ -4540,13 +4588,24 @@ private static void AddInputPath(string rawPath)
 
 private static void StartScan()
 {
+    StartScanInternal(new List<string>(_paths), true);
+}
+
+private static void StartScanInternal(List<string> scanPaths, bool resetSkipped)
+{
     _scanning = true;
     _scanGeneration++;
     Interlocked.Increment(ref _recomputeGeneration);
-    _skippedFolders = 0;
-    _skippedInvalid = 0;
+    if (_executeButton != null)
+        _executeButton.IsEnabled = false;
+    SetApplyEnabled(false);
+    if (resetSkipped)
+    {
+        _skippedFolders = 0;
+        _skippedInvalid = 0;
+    }
     int generation = _scanGeneration;
-    List<string> paths = new List<string>(_paths);
+    List<string> paths = new List<string>(scanPaths == null ? new List<string>() : scanPaths);
     Dispatcher dispatcher = _window.Dispatcher;
 
     _scanPerfStartTicks = DateTime.UtcNow.Ticks;
@@ -4711,6 +4770,7 @@ private static void AddFileBatch(List<Dictionary<string, object>> batch)
         item["Details"] = BuildDetails(item);
         _files.Add(item);
         _rows.Add(item);
+        _loadedPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
     }
     if (_scanning)
         _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
@@ -4743,6 +4803,7 @@ private static void FinishScan(int generation)
     _previewDirty = false;
     UpdateRealTimeUi();
     RecomputeAll();
+    ReapplyActiveSort();
 }
 
 private static Dictionary<string, object> BuildFileItem(string path, out bool isDirectory)
@@ -5130,13 +5191,23 @@ private static void RecomputeAll(bool synchronous)
 
     _statusText.Text = "正在计算目标路径…";
     Dispatcher dispatcher = _window.Dispatcher;
+    Interlocked.Increment(ref _layoutWorkerCount);
     Thread thread = new Thread(delegate()
     {
-        RowLayout[] layouts = ComputeLayouts(context, generation);
-        if (layouts == null)
-            return;
+        RowLayout[] layouts = null;
+        try
+        {
+            layouts = ComputeLayouts(context, generation);
+        }
+        catch
+        {
+            layouts = null;
+        }
         Post(dispatcher, delegate()
         {
+            Interlocked.Decrement(ref _layoutWorkerCount);
+            if (layouts == null)
+                return;
             if (generation == _recomputeGeneration && !_scanning && !_previewDirty && !_executing)
             {
                 _layoutPerfText = context.PerfText == null ? _layoutPerfText : context.PerfText;
@@ -6123,8 +6194,11 @@ private static void RefreshSelection_Click(object sender, RoutedEventArgs e)
         return;
     }
 
-    List<string> selected = GetExplorerSelectedPaths();
-    if (selected.Count == 0)
+    bool explorerFound;
+    bool preferredFound;
+    List<string> selected = GetExplorerSelectedPaths(IntPtr.Zero,
+        out explorerFound, out preferredFound);
+    if (!explorerFound || selected.Count == 0)
     {
         MessageBox.Show("未选中任何文件。", "重新获取选择的文件",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -6134,11 +6208,14 @@ private static void RefreshSelection_Click(object sender, RoutedEventArgs e)
     ReplaceInputSelection(selected, false);
 }
 
-// 读取资源管理器窗口的选中项；仅保留仍存在的文件，忽略文件夹与虚拟项。
-private static List<string> GetExplorerSelectedPaths()
+// 读取资源管理器窗口的选中项；优先读取指定窗口，否则合并所有资源管理器窗口。
+private static List<string> GetExplorerSelectedPaths(IntPtr preferredWindow,
+    out bool explorerFound, out bool preferredFound)
 {
     List<string> paths = new List<string>();
     HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    explorerFound = false;
+    preferredFound = false;
     object shell = null;
     object windows = null;
     try
@@ -6157,35 +6234,22 @@ private static List<string> GetExplorerSelectedPaths()
             windows = InvokeCom(shell, "Windows", true);
         }
         List<object> windowItems = GetComItems(windows);
-        if (windowItems.Count == 0)
-            return paths;
+        explorerFound = windowItems.Count > 0;
 
-        foreach (object window in windowItems)
+        if (preferredWindow != IntPtr.Zero)
         {
-            object document = InvokeCom(window, "Document", true);
-            if (document == null)
-                continue;
-            object selected = InvokeCom(document, "SelectedItems", false);
-            List<object> selectedItems = GetComItems(selected);
-            foreach (object item in selectedItems)
+            for (int i = 0; i < windowItems.Count; i++)
             {
-                string path = Convert.ToString(InvokeCom(item, "Path", true),
-                    CultureInfo.InvariantCulture);
-                if (path == null || path.Length == 0)
+                if (GetShellWindowHandle(windowItems[i]) != preferredWindow)
                     continue;
-                try
-                {
-                    if (!File.Exists(path))
-                        continue;
-                }
-                catch
-                {
-                    continue;
-                }
-                if (seen.Add(path))
-                    paths.Add(path);
+                preferredFound = true;
+                CollectWindowSelection(windowItems[i], paths, seen);
+                return paths;
             }
         }
+
+        for (int i = 0; i < windowItems.Count; i++)
+            CollectWindowSelection(windowItems[i], paths, seen);
     }
     catch
     {
@@ -6196,6 +6260,49 @@ private static List<string> GetExplorerSelectedPaths()
         ReleaseComObject(shell);
     }
     return paths;
+}
+
+private static void CollectWindowSelection(object window, List<string> paths,
+    HashSet<string> seen)
+{
+    object document = InvokeCom(window, "Document", true);
+    if (document == null)
+        return;
+    object selected = InvokeCom(document, "SelectedItems", false);
+    List<object> selectedItems = GetComItems(selected);
+    for (int i = 0; i < selectedItems.Count; i++)
+    {
+        string path = Convert.ToString(InvokeCom(selectedItems[i], "Path", true),
+            CultureInfo.InvariantCulture);
+        if (path == null || path.Length == 0)
+            continue;
+        try
+        {
+            if (!File.Exists(path))
+                continue;
+        }
+        catch
+        {
+            continue;
+        }
+        if (seen.Add(path))
+            paths.Add(path);
+    }
+}
+
+private static IntPtr GetShellWindowHandle(object window)
+{
+    object value = InvokeCom(window, "HWND", true);
+    if (value == null)
+        return IntPtr.Zero;
+    try
+    {
+        return new IntPtr(Convert.ToInt64(value, CultureInfo.InvariantCulture));
+    }
+    catch
+    {
+        return IntPtr.Zero;
+    }
 }
 
 // 读取 COM 集合：优先 IEnumerable，否则按 Count/Item 逐个取。
@@ -6289,6 +6396,7 @@ private static void ReplaceInputSelection(List<string> selected, bool silent)
     _files = new List<Dictionary<string, object>>();
     _paths = new List<string>();
     _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _loadedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     _skippedFolders = 0;
     _skippedInvalid = 0;
     _previewDirty = false;
@@ -6307,20 +6415,7 @@ private static void ReplaceInputSelection(List<string> selected, bool silent)
     for (int i = 0; i < selected.Count; i++)
         AddInputPath(selected[i]);
     _lastSelectionKey = BuildSelectionKey(_paths);
-
-    if (_data != null)
-    {
-        List<object> fileList = new List<object>();
-        for (int i = 0; i < _paths.Count; i++)
-            fileList.Add(_paths[i]);
-        _data["files"] = fileList;
-        if (DeliveryMode != 2 && DeliveryMode != 3)
-        {
-            _data["origPaths"] = new List<object>();
-            _data["targetPaths"] = new List<object>();
-            _data["actions"] = new List<object>();
-        }
-    }
+    PublishInputFiles();
 
     _scanPerfText = "";
     _layoutPerfText = "";
@@ -6347,6 +6442,175 @@ private static void ReplaceInputSelection(List<string> selected, bool silent)
     _statusText.Text = "已重新获取 " + _paths.Count + " 个文件，正在读取属性…";
 }
 
+private static void PublishInputFiles()
+{
+    if (_data == null)
+        return;
+    List<object> fileList = new List<object>();
+    for (int i = 0; i < _paths.Count; i++)
+        fileList.Add(_paths[i]);
+    _data["files"] = fileList;
+    if (DeliveryMode != 2 && DeliveryMode != 3)
+    {
+        _data["origPaths"] = new List<object>();
+        _data["targetPaths"] = new List<object>();
+        _data["actions"] = new List<object>();
+    }
+}
+
+private static List<string> NormalizeSelectedPaths(List<string> selected)
+{
+    List<string> result = new List<string>();
+    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (selected == null)
+        return result;
+    for (int i = 0; i < selected.Count; i++)
+    {
+        string text = selected[i] == null ? "" : selected[i].Trim();
+        if (text.Length >= 2 && text[0] == '"' && text[text.Length - 1] == '"')
+            text = text.Substring(1, text.Length - 2).Trim();
+        if (text.Length == 0)
+            continue;
+        string full;
+        try
+        {
+            full = Path.GetFullPath(text);
+        }
+        catch
+        {
+            continue;
+        }
+        if (seen.Add(full))
+            result.Add(full);
+    }
+    return result;
+}
+
+// 增量对比：只删除取消选中的行、只扫描新增文件；已加载行保留，避免整表重建。
+private static void ApplySelectionDiff(List<string> selected)
+{
+    // 后台布局线程仍持有旧文件列表索引时先等待，避免边读边改。
+    if (Thread.VolatileRead(ref _layoutWorkerCount) > 0)
+    {
+        _pendingSelectionDiff = new List<string>(selected);
+        EnsureSelectionApplyTimer();
+        return;
+    }
+
+    List<string> normalized = NormalizeSelectedPaths(selected);
+    HashSet<string> selectedSet = new HashSet<string>(normalized, StringComparer.OrdinalIgnoreCase);
+
+    // 取消正在进行的扫描/哈希/布局，避免旧任务向新列表追加数据。
+    _scanGeneration++;
+    _hashGeneration++;
+    Interlocked.Increment(ref _recomputeGeneration);
+    _hashStop = true;
+    _hashRunning = false;
+    _hashAlgorithm = "";
+    _scanning = false;
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+    if (_gridFilterTimer != null)
+        _gridFilterTimer.Stop();
+    if (_grid != null)
+    {
+        _grid.CanUserSortColumns = true;
+        _grid.ToolTip = null;
+    }
+    CloseHeaderFilterPopup();
+    _progress.Visibility = Visibility.Collapsed;
+
+    // 删除已加载但不再选中的行；未加载的路径只需从路径列表移除。
+    Dictionary<string, Dictionary<string, object>> loadedItems =
+        new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+    for (int i = 0; i < _files.Count; i++)
+    {
+        string source = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
+        if (source != null && source.Length > 0)
+            loadedItems[source] = _files[i];
+    }
+    List<string> removed = new List<string>();
+    foreach (string loadedPath in _loadedPaths)
+    {
+        if (!selectedSet.Contains(loadedPath))
+            removed.Add(loadedPath);
+    }
+    for (int i = 0; i < removed.Count; i++)
+    {
+        Dictionary<string, object> item;
+        if (loadedItems.TryGetValue(removed[i], out item))
+        {
+            _files.Remove(item);
+            _rows.Remove(item);
+        }
+        _loadedPaths.Remove(removed[i]);
+    }
+
+    _paths = new List<string>(normalized);
+    _pathSet = new HashSet<string>(normalized, StringComparer.OrdinalIgnoreCase);
+    _lastSelectionKey = BuildSelectionKey(normalized);
+
+    List<string> missing = new List<string>();
+    for (int i = 0; i < normalized.Count; i++)
+    {
+        if (!_loadedPaths.Contains(normalized[i]))
+            missing.Add(normalized[i]);
+    }
+
+    PublishInputFiles();
+    RefreshErrorBanner("");
+    ApplyGridFilter();
+    UpdateStatus();
+
+    if (missing.Count == 0)
+    {
+        _grid.Items.Refresh();
+        ReapplyActiveSort();
+        UpdateGridFilterCount();
+        return;
+    }
+
+    _scanPerfText = "";
+    _layoutPerfText = "";
+    _scanPerfStartTicks = 0;
+    _scanPerfCpuStart = TimeSpan.Zero;
+    _scanPerfCpuValid = false;
+    _scanPerfBuildTicks = 0;
+    _scanPerfWorkerCount = 0;
+    _scanPerfPathCount = 0;
+    UpdatePerfText();
+    StartScanInternal(missing, false);
+    _statusText.Text = "实时获取：新增 " + missing.Count + " 个文件，正在读取属性…";
+}
+
+private static void EnsureSelectionApplyTimer()
+{
+    if (_window == null)
+        return;
+    if (_selectionApplyTimer == null)
+    {
+        _selectionApplyTimer = new DispatcherTimer();
+        _selectionApplyTimer.Interval = TimeSpan.FromMilliseconds(150);
+        _selectionApplyTimer.Tick += delegate(object sender, EventArgs e)
+        {
+            if (_selectionApplyTimer != null)
+                _selectionApplyTimer.Stop();
+            if (Thread.VolatileRead(ref _layoutWorkerCount) > 0)
+            {
+                if (_selectionApplyTimer != null)
+                    _selectionApplyTimer.Start();
+                return;
+            }
+            List<string> pending = _pendingSelectionDiff;
+            _pendingSelectionDiff = null;
+            if (pending != null && IsRealTimeSelectionEnabled())
+                ApplySelectionDiff(pending);
+        };
+    }
+    _selectionApplyTimer.Stop();
+    _selectionApplyTimer.Start();
+}
+
 private static bool IsRealTimeSelectionEnabled()
 {
     return _realTimeSelectionCheck != null && _realTimeSelectionCheck.IsChecked == true;
@@ -6364,6 +6628,7 @@ private static void RealTimeSelectionCheck_Changed(object sender, RoutedEventArg
     else
     {
         RemoveSelectionHook();
+        _lastExplorerWindow = IntPtr.Zero;
     }
 }
 
@@ -6401,6 +6666,11 @@ private static void RemoveSelectionHook()
     }
     if (_selectionDebounceTimer != null)
         _selectionDebounceTimer.Stop();
+    if (_selectionGuardTimer != null)
+        _selectionGuardTimer.Stop();
+    if (_selectionApplyTimer != null)
+        _selectionApplyTimer.Stop();
+    _pendingSelectionDiff = null;
     StopSelectionFallbackTimer();
 }
 
@@ -6410,8 +6680,10 @@ private static void SelectionEventCallback(IntPtr hWinEventHook, uint eventType,
     // 回调可能来自系统事件线程：这里只读非WPF字段，具体开关状态在UI线程再判断。
     if (_selectionHook == IntPtr.Zero || _window == null || _executing)
         return;
-    if (!IsExplorerForeground())
+    IntPtr foreground = GetForegroundWindow();
+    if (!IsExplorerWindow(foreground))
         return;
+    _lastExplorerWindow = foreground;
     ScheduleRealTimeSelectionRefresh();
 }
 
@@ -6433,7 +6705,7 @@ private static void ScheduleRealTimeSelectionRefresh()
                 {
                     if (_selectionDebounceTimer != null)
                         _selectionDebounceTimer.Stop();
-                    ApplyRealTimeSelection();
+                    ApplyRealTimeSelection(false);
                 };
             }
             _selectionDebounceTimer.Stop();
@@ -6446,24 +6718,30 @@ private static void ScheduleRealTimeSelectionRefresh()
     }
 }
 
-private static void ApplyRealTimeSelection()
+private static void ApplyRealTimeSelection(bool forceCheck)
 {
     if (!IsRealTimeSelectionEnabled() || _executing || _window == null)
         return;
-    // 本窗口为焦点时不刷新，避免用户在本窗口操作时列表突然变化。
-    if (_window.IsActive)
+    // 本窗口为焦点时不刷新；唯一例外是窗口激活后的守门员复核。
+    if (!forceCheck && _window.IsActive)
         return;
-    if (!IsExplorerForeground())
+    if (!forceCheck && !IsExplorerForeground())
         return;
 
-    List<string> selected = GetExplorerSelectedPaths();
-    if (selected.Count == 0)
+    bool explorerFound;
+    bool preferredFound;
+    List<string> selected = GetExplorerSelectedPaths(_lastExplorerWindow,
+        out explorerFound, out preferredFound);
+    if (!explorerFound)
         return;
+    if (_lastExplorerWindow != IntPtr.Zero && !preferredFound)
+        return;
+
     string key = BuildSelectionKey(selected);
     if (key == _lastSelectionKey)
         return;
     _lastSelectionKey = key;
-    ReplaceInputSelection(selected, true);
+    ApplySelectionDiff(selected);
 }
 
 private static void StartSelectionFallbackTimer()
@@ -6476,7 +6754,7 @@ private static void StartSelectionFallbackTimer()
         _selectionFallbackTimer.Interval = TimeSpan.FromMilliseconds(1500);
         _selectionFallbackTimer.Tick += delegate(object sender, EventArgs e)
         {
-            ApplyRealTimeSelection();
+            ApplyRealTimeSelection(false);
         };
     }
     _selectionFallbackTimer.Start();
@@ -8426,6 +8704,9 @@ private static void Window_Closed(object sender, EventArgs e)
     _realTimeSelectionCheck = null;
     _selectionDebounceTimer = null;
     _selectionFallbackTimer = null;
+    _selectionGuardTimer = null;
+    _selectionApplyTimer = null;
+    _pendingSelectionDiff = null;
     _lastSelectionKey = "";
     _filterExtensionsText = null;
     _filterModeCombo = null;
@@ -8453,6 +8734,8 @@ private static void Window_Closed(object sender, EventArgs e)
     _files = new List<Dictionary<string, object>>();
     _paths = new List<string>();
     _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _loadedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _lastExplorerWindow = IntPtr.Zero;
     _hashCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     _config = null;
 }
