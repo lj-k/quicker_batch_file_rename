@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -26,7 +27,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.9
+// 版本：0.06.10
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -52,6 +53,7 @@ private static CheckBox _preferExifCheck;
 private static ComboBox _algorithmCombo;
 private static TextBlock _checksumBadge;
 private static TextBlock _statusText;
+private static TextBlock _perfText;
 private static ProgressBar _progress;
 private static Button _browseRootButton;
 private static Button _applyButton;
@@ -152,6 +154,16 @@ private const int ScanPublishBatchSize = 200;
 // 每个计算线程复用一份模板词典，避免逐文件分配。
 [ThreadStatic] private static Dictionary<string, string> _layoutValues;
 
+// 性能显示：扫描与目标路径计算的速度、线程数、瓶颈判断。
+private static string _scanPerfText = "";
+private static string _layoutPerfText = "";
+private static long _scanPerfStartTicks = 0;
+private static TimeSpan _scanPerfCpuStart = TimeSpan.Zero;
+private static bool _scanPerfCpuValid = false;
+private static long _scanPerfBuildTicks = 0;
+private static int _scanPerfWorkerCount = 0;
+private static int _scanPerfPathCount = 0;
+
 // 单行的目标路径计算结果。后台线程只写自己的槽位，UI线程统一应用。
 private sealed class RowLayout
 {
@@ -186,6 +198,12 @@ private sealed class LayoutContext
     public string FilterMode;
     public string FilterExtensions;
     public bool HasFilter;
+    public long StartTicks;
+    public TimeSpan CpuStart;
+    public bool CpuStartValid;
+    public int ActualWorkers;
+    public int IoWorkers;
+    public string PerfText;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +291,7 @@ private static void FindControls(Window win)
     _algorithmCombo = (ComboBox)win.FindName("AlgorithmCombo");
     _checksumBadge = (TextBlock)win.FindName("ChecksumBadge");
     _statusText = (TextBlock)win.FindName("StatusText");
+    _perfText = (TextBlock)win.FindName("PerfText");
     _progress = (ProgressBar)win.FindName("Progress");
     _browseRootButton = (Button)win.FindName("BrowseRootButton");
     _applyButton = (Button)win.FindName("BtnApply");
@@ -323,6 +342,15 @@ private static void ResetRuntimeState()
     _skippedInvalid = 0;
     _lastCaret = null;
     _previewDirty = false;
+    _scanPerfText = "";
+    _layoutPerfText = "";
+    _scanPerfStartTicks = 0;
+    _scanPerfCpuStart = TimeSpan.Zero;
+    _scanPerfCpuValid = false;
+    _scanPerfBuildTicks = 0;
+    _scanPerfWorkerCount = 0;
+    _scanPerfPathCount = 0;
+    UpdatePerfText();
     _templateHashCheckKey = null;
     _templateHashCheckValue = false;
     _suppressPresetSelection = false;
@@ -915,6 +943,8 @@ private static void ApplyUiConfig()
             RefreshDates(true, false);
         else if (dateChanged || fallbackChanged || preferExifChanged)
             RefreshDates(false, false);
+        _layoutPerfText = "目标路径：待刷新（实时预览已关闭）";
+        UpdatePerfText();
         RefreshErrorBanner("");
         UpdateStatus();
         return;
@@ -1087,6 +1117,14 @@ private static void StartScan()
     List<string> paths = new List<string>(_paths);
     Dispatcher dispatcher = _window.Dispatcher;
 
+    _scanPerfStartTicks = DateTime.UtcNow.Ticks;
+    _scanPerfCpuValid = TryGetProcessCpuTime(out _scanPerfCpuStart);
+    _scanPerfBuildTicks = 0;
+    _scanPerfPathCount = paths.Count;
+    _scanPerfText = "属性读取：进行中…";
+    _layoutPerfText = "";
+    UpdatePerfText();
+
     _progress.Visibility = Visibility.Visible;
     _progress.IsIndeterminate = true;
     _statusText.Text = "正在读取文件属性…";
@@ -1108,6 +1146,7 @@ private static void StartScan()
     int workerCount = Math.Min(chunkCount,
         Math.Min(ScanMaxWorkers, Math.Max(4, Environment.ProcessorCount * 2)));
     int workersRemaining = workerCount;
+    _scanPerfWorkerCount = workerCount;
 
     for (int w = 0; w < workerCount; w++)
     {
@@ -1132,7 +1171,10 @@ private static void StartScan()
                             if (generation != _scanGeneration)
                                 break;
                             bool isDirectory;
+                            long itemStart = Stopwatch.GetTimestamp();
                             Dictionary<string, object> item = BuildFileItem(paths[i], out isDirectory);
+                            Interlocked.Add(ref _scanPerfBuildTicks,
+                                Stopwatch.GetTimestamp() - itemStart);
                             if (item != null)
                                 batch.Add(item);
                             else if (isDirectory)
@@ -1208,10 +1250,15 @@ private static void StartScan()
                 break;
         }
 
+        string perfText = BuildScanPerfText();
         Post(dispatcher, delegate()
         {
             if (generation == _scanGeneration)
+            {
+                _scanPerfText = perfText;
+                UpdatePerfText();
                 FinishScan(generation);
+            }
         });
     });
     publisher.IsBackground = true;
@@ -1622,12 +1669,18 @@ private static void RecomputeAll(bool synchronous)
     LayoutContext context = CreateLayoutContext();
     int generation = Interlocked.Increment(ref _recomputeGeneration);
     int count = _files.Count;
+    _layoutPerfText = "目标路径：计算中…";
+    UpdatePerfText();
 
     if (synchronous || count < AsyncRecomputeThreshold)
     {
         RowLayout[] layouts = ComputeLayouts(context, generation);
         if (layouts != null)
+        {
+            _layoutPerfText = context.PerfText == null ? _layoutPerfText : context.PerfText;
             ApplyLayouts(layouts, context);
+            UpdatePerfText();
+        }
         return;
     }
 
@@ -1641,7 +1694,11 @@ private static void RecomputeAll(bool synchronous)
         Post(dispatcher, delegate()
         {
             if (generation == _recomputeGeneration && !_scanning && !_previewDirty && !_executing)
+            {
+                _layoutPerfText = context.PerfText == null ? _layoutPerfText : context.PerfText;
                 ApplyLayouts(layouts, context);
+                UpdatePerfText();
+            }
         });
     });
     thread.IsBackground = true;
@@ -1667,6 +1724,8 @@ private static LayoutContext CreateLayoutContext()
     context.FilterMode = _config["filterMode"];
     context.FilterExtensions = NormalizeExtensionList(_config["filterExtensions"]);
     context.HasFilter = context.FilterExtensions.Length > 0;
+    context.StartTicks = DateTime.UtcNow.Ticks;
+    context.CpuStartValid = TryGetProcessCpuTime(out context.CpuStart);
     return context;
 }
 
@@ -1697,12 +1756,15 @@ private static RowLayout[] ComputeLayouts(LayoutContext context, int generation)
             layout.Error = "内部错误：" + ex.Message;
             layouts[index] = layout;
         }
-    });
+    }, out context.ActualWorkers);
 
     if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
         return null;
-    if (!FinalizeLayouts(layouts, generation))
+    if (!FinalizeLayouts(layouts, generation, context))
         return null;
+    context.PerfText = BuildPerfLine("目标路径", count, context.StartTicks,
+        context.CpuStart, context.CpuStartValid, -1, context.ActualWorkers,
+        context.IoWorkers, "存在性");
     return layouts;
 }
 
@@ -1832,7 +1894,7 @@ private static RowLayout ComputeLayout(Dictionary<string, object> item, LayoutCo
 }
 
 // 重复目标与目标存在性检查：存在性检查是I/O，按唯一目标并行执行。
-private static bool FinalizeLayouts(RowLayout[] layouts, int generation)
+private static bool FinalizeLayouts(RowLayout[] layouts, int generation, LayoutContext context)
 {
     Dictionary<string, List<int>> targetMap =
         new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
@@ -1877,6 +1939,7 @@ private static bool FinalizeLayouts(RowLayout[] layouts, int generation)
     }
 
     int cancelled = 0;
+    int existenceWorkers;
     RunIndexedParallel(checkIndices.Count, SelectIoWorkers(checkIndices.Count), delegate(int slot)
     {
         if (Thread.VolatileRead(ref _recomputeGeneration) != generation)
@@ -1894,7 +1957,8 @@ private static bool FinalizeLayouts(RowLayout[] layouts, int generation)
         {
             layouts[index].TargetCheckFailed = true;
         }
-    });
+    }, out existenceWorkers);
+    context.IoWorkers = existenceWorkers;
     if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
         return false;
 
@@ -1978,8 +2042,11 @@ private static int SelectIoWorkers(int count)
 }
 
 // 调度器：用原子计数分发索引，每个索引只执行一次；线程只写自己的结果槽位。
-private static void RunIndexedParallel(int count, int workerCount, Action<int> body)
+// actualWorkers 为实际创建的线程数；0 表示在主线程内联执行。
+private static void RunIndexedParallel(int count, int workerCount, Action<int> body,
+    out int actualWorkers)
 {
+    actualWorkers = 0;
     if (count <= 0)
         return;
     if (workerCount > count)
@@ -1991,6 +2058,7 @@ private static void RunIndexedParallel(int count, int workerCount, Action<int> b
         return;
     }
 
+    actualWorkers = workerCount;
     int next = -1;
     using (CountdownEvent done = new CountdownEvent(workerCount))
     {
@@ -2022,6 +2090,101 @@ private static void RunIndexedParallel(int count, int workerCount, Action<int> b
             ThreadPool.QueueUserWorkItem(worker);
         done.Wait();
     }
+}
+
+private static bool TryGetProcessCpuTime(out TimeSpan value)
+{
+    value = TimeSpan.Zero;
+    try
+    {
+        value = Process.GetCurrentProcess().TotalProcessorTime;
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+private static string BuildScanPerfText()
+{
+    long buildTicks = Interlocked.Read(ref _scanPerfBuildTicks);
+    double averageMs = _scanPerfPathCount > 0
+        ? (buildTicks * 1000.0 / Stopwatch.Frequency) / _scanPerfPathCount
+        : 0;
+    return BuildPerfLine("属性读取", _scanPerfPathCount, _scanPerfStartTicks,
+        _scanPerfCpuStart, _scanPerfCpuValid, averageMs, _scanPerfWorkerCount, 1, "发布");
+}
+
+private static string BuildPerfLine(string label, int count, long startTicks,
+    TimeSpan cpuStart, bool cpuValid, double averageItemMs, int workers,
+    int extraWorkers, string extraLabel)
+{
+    double seconds = Math.Max(0.0001,
+        (DateTime.UtcNow.Ticks - startTicks) / (double)TimeSpan.TicksPerSecond);
+    double rate = count / seconds;
+
+    string threadText;
+    if (workers <= 0)
+        threadText = "主线程内联";
+    else
+        threadText = "线程 " + workers.ToString(CultureInfo.InvariantCulture);
+    if (extraWorkers > 0)
+        threadText += "（另" + extraLabel + "线程 " + extraWorkers + "）";
+
+    string bottleneck;
+    string cpuText;
+    TimeSpan cpuEnd;
+    if (cpuValid && TryGetProcessCpuTime(out cpuEnd))
+    {
+        // 按实际可用的计算线程折算，避免多核机器上把“8线程跑满”误判为I/O。
+        int cpuSlots = workers > 0
+            ? Math.Min(Environment.ProcessorCount, workers) : 1;
+        double cpuRatio = (cpuEnd - cpuStart).TotalSeconds /
+            (seconds * Math.Max(1, cpuSlots));
+        if (cpuRatio < 0) cpuRatio = 0;
+        if (cpuRatio > 1) cpuRatio = 1;
+        cpuText = "CPU占用 " +
+            (cpuRatio * 100).ToString("0", CultureInfo.InvariantCulture) + "%";
+        bottleneck = ClassifyPerformanceBottleneck(count, seconds, cpuRatio);
+    }
+    else
+    {
+        cpuText = "CPU占用 未知";
+        bottleneck = "未知";
+    }
+
+    StringBuilder builder = new StringBuilder();
+    builder.Append(label);
+    builder.Append("：");
+    builder.Append(rate.ToString("N0", CultureInfo.InvariantCulture));
+    builder.Append(" 个/秒（");
+    builder.Append(count.ToString(CultureInfo.InvariantCulture));
+    builder.Append("个 / ");
+    builder.Append(seconds.ToString("0.00", CultureInfo.InvariantCulture));
+    builder.Append("s，");
+    builder.Append(threadText);
+    if (averageItemMs >= 0)
+    {
+        builder.Append("，平均 ");
+        builder.Append(averageItemMs.ToString("0.0", CultureInfo.InvariantCulture));
+        builder.Append(" ms/个");
+    }
+    builder.Append("，瓶颈：");
+    builder.Append(bottleneck);
+    builder.Append("，");
+    builder.Append(cpuText);
+    builder.Append("）");
+    return builder.ToString();
+}
+
+private static void UpdatePerfText()
+{
+    if (_perfText == null)
+        return;
+    string scan = _scanPerfText.Length == 0 ? "属性读取：—" : _scanPerfText;
+    string layout = _layoutPerfText.Length == 0 ? "目标路径：—" : _layoutPerfText;
+    _perfText.Text = scan + "\n" + layout;
 }
 
 private static void RefreshRowDetails(Dictionary<string, object> item)

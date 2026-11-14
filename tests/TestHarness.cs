@@ -994,6 +994,22 @@ public static class TestHarness
         Check(!CoreUnderTest.IsCloudPlaceholderAttributes(0),
             "corner: normal file is not cloud placeholder");
 
+        // 性能瓶颈判断：样本量、CPU占用阈值与越界钳制。
+        CheckEqual("样本小", CoreUnderTest.ClassifyPerformanceBottleneck(10, 1.0, 0.9),
+            "perf: small count");
+        CheckEqual("样本小", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 0.01, 0.9),
+            "perf: short duration");
+        CheckEqual("CPU", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 1.0, 0.9),
+            "perf: cpu bound");
+        CheckEqual("I/O", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 1.0, 0.1),
+            "perf: io bound");
+        CheckEqual("CPU/I/O混合", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 1.0, 0.5),
+            "perf: mixed");
+        CheckEqual("I/O", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 1.0, -1),
+            "perf: negative cpu clamps to io");
+        CheckEqual("CPU", CoreUnderTest.ClassifyPerformanceBottleneck(1000, 1.0, 2),
+            "perf: over-range cpu clamps to cpu");
+
         // 同卷判断：盘符大小写不敏感，不同盘符不同卷。
         Check(CoreUnderTest.IsSameVolumePath(@"C:\a\1.txt", @"c:\b\2.txt"),
             "corner: same drive case-insensitive");

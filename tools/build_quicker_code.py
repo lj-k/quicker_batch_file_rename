@@ -34,7 +34,7 @@ for line in core_usings + aux_usings:
         seen.add(line)
         usings.append(line)
 
-header = "// 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）\n// 版本：0.06.9\n"
+header = "// 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）\n// 版本：0.06.10\n"
 deployed = header + "\n".join(usings) + "\n\n" + "\n".join(core_body) + "\n\n" + "\n".join(aux_body) + "\n"
 DIST.parent.mkdir(parents=True, exist_ok=True)
 DIST.write_text(deployed, encoding="utf-8")
