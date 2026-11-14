@@ -27,7 +27,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.12
+// 版本：0.06.13
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -1332,6 +1332,11 @@ private static void StartScan()
     _progress.Visibility = Visibility.Visible;
     _progress.IsIndeterminate = true;
     _statusText.Text = "正在读取文件属性…";
+    if (_grid != null)
+    {
+        _grid.CanUserSortColumns = false;
+        _grid.ToolTip = "正在读取文件属性，扫描完成后可排序";
+    }
 
     int chunkCount = (paths.Count + ScanChunkSize - 1) / ScanChunkSize;
     if (chunkCount <= 0)
@@ -1491,6 +1496,11 @@ private static void FinishScan(int generation)
 
     _scanning = false;
     _progress.Visibility = Visibility.Collapsed;
+    if (_grid != null)
+    {
+        _grid.CanUserSortColumns = true;
+        _grid.ToolTip = null;
+    }
 
     int expected = _paths.Count;
     if (_files.Count < expected)
@@ -3737,8 +3747,6 @@ private static void Execute_Click(object sender, RoutedEventArgs e)
         if (action == null || action.Length == 0 || action == "跳过" ||
             target == null || target.Length == 0)
             continue;
-        item["ExecState"] = "";
-        item["ExecDetails"] = "";
         queue.Add(item);
     }
 
@@ -3747,6 +3755,31 @@ private static void Execute_Click(object sender, RoutedEventArgs e)
         MessageBox.Show("没有可执行的文件，请检查过滤器、模板与文件状态。", "批量重命名器",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
         return;
+    }
+
+    // 删除源文件不可撤销，执行前单独确认删除数量。
+    int deleteSourceCount = 0;
+    for (int i = 0; i < queue.Count; i++)
+    {
+        string queuedAction = Convert.ToString(queue[i]["Action"], CultureInfo.InvariantCulture);
+        if (queuedAction == "删除原文件")
+            deleteSourceCount++;
+    }
+    if (deleteSourceCount > 0)
+    {
+        DialogResult deleteAnswer = MessageBox.Show(
+            "本次执行将删除 " + deleteSourceCount +
+            " 个源文件（目标文件已存在且内容相同）。\n\n删除源文件无法从本窗口恢复，是否继续？",
+            "确认删除源文件", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (deleteAnswer != DialogResult.Yes)
+            return;
+    }
+
+    // 确认通过后再清空上一轮执行结果，取消确认时保留原显示。
+    for (int i = 0; i < queue.Count; i++)
+    {
+        queue[i]["ExecState"] = "";
+        queue[i]["ExecDetails"] = "";
     }
 
     // 执行前先写出非跳过列表与动作，窗口中途关闭时数据映射仍有有效输出。

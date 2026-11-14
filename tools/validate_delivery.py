@@ -67,6 +67,19 @@ check('Header="源路径名"' in xaml_text and 'SortMemberPath="SourcePath"' in 
       "source path column is sortable")
 check('Header="目标路径名/文件名"' in xaml_text and 'SortMemberPath="TargetPath"' in xaml_text,
       "target path column is sortable")
+check('x:Key="GridCellText"' in xaml_text and 'TextTrimming" Value="CharacterEllipsis"' in xaml_text,
+      "grid cells ellipsize long text")
+check('ScrollViewer.HorizontalScrollBarVisibility="Auto"' in xaml_text,
+      "grid can scroll horizontally when columns hit min width")
+check('Text="—"' in xaml_text, "empty error/execution cells show a dash")
+check("筛选和排序只影响预览显示" in xaml_text,
+      "filter bar explains display-only behavior")
+check("确认删除源文件" in aux_text and "将删除" in aux_text,
+      "execution confirms destructive delete-source actions")
+check("CanUserSortColumns = false" in aux_text and "CanUserSortColumns = true" in aux_text,
+      "sorting is disabled while scanning")
+check("MinWidth=\"180\"" in xaml_text and "MinWidth=\"240\"" in xaml_text,
+      "path columns have minimum widths")
 check('Binding="{Binding [ExecState]}" Value="done"' in xaml_text,
       "DataGrid has execution state background trigger")
 check('Property="Foreground" Value="#027A48"' not in xaml_text,
@@ -83,7 +96,7 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.12", "deployed code version is 0.06.12")
+check(dist_text.splitlines()[1] == "// 版本：0.06.13", "deployed code version is 0.06.13")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
@@ -113,7 +126,7 @@ check("TemplateNeedsHash" in dist_text, "deployed code caches template checksum 
 check("BitmapCacheOption.None" in dist_text, "deployed code reads EXIF metadata only")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.12" in core_text, "core source version is 0.06.12")
+check("// 版本：0.06.13" in core_text, "core source version is 0.06.13")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("preferExifOnFilenameConflict" in core_text, "core contains exif conflict config")
 check("BuildFlatPresetDictionary" in core_text, "core contains flat preset builder")
@@ -144,8 +157,8 @@ check("BuildPerfLine" in aux_text, "aux reports scan and layout performance")
 check("ClassifyPerformanceBottleneck" in core_text, "core classifies CPU/IO bottleneck")
 check("UpdatePerfText" in aux_text and "PerfText" in xaml_text,
       "aux wires performance text into the footer")
-check('// 版本：0.06.12' in aux_text, "aux source version is 0.06.12")
-check("XAML 版本：0.06.12" in xaml_text, "XAML version is 0.06.12")
+check('// 版本：0.06.13' in aux_text, "aux source version is 0.06.13")
+check("XAML 版本：0.06.13" in xaml_text, "XAML version is 0.06.13")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -168,8 +181,8 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.20" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.20")
+check("> 版本：0.0.21" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.21")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
@@ -179,8 +192,8 @@ check("winContext.Context.SetVarValue" in req_text, "requirements includes direc
 check("交互窗口与执行性能优化" in req_text, "requirements includes performance optimization")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.12"),
-    ("doc/测试报告.md", "0.06.12"),
+    ("doc/开发说明.md", "0.06.13"),
+    ("doc/测试报告.md", "0.06.13"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -192,7 +205,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.12]" in changelog_text, "CHANGELOG has 0.06.12 entry")
+    check("[0.06.13]" in changelog_text, "CHANGELOG has 0.06.13 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -216,8 +229,8 @@ s2 = release / "方案2-执行不输出列表"
 for folder in [s1, s2]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.12",
-          str(folder.name) + " Aux version 0.06.12")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.13",
+          str(folder.name) + " Aux version 0.06.13")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

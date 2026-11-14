@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.12 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.13 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -39,6 +39,10 @@
             <Setter Property="Padding" Value="6,0"/>
             <Setter Property="BorderBrush" Value="{StaticResource FieldBorderBrush}"/>
             <Setter Property="Margin" Value="0,0,10,0"/>
+        </Style>
+
+        <Style x:Key="GridCellText" TargetType="TextBlock">
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         </Style>
 
         <Style x:Key="CardBorder" TargetType="Border">
@@ -457,7 +461,8 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <Grid Margin="8,6,8,2">
+                <Grid Margin="8,6,8,2"
+                      ToolTip="筛选和排序只影响预览显示，不改变执行顺序和输出列表顺序。">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="220"/>
@@ -502,16 +507,83 @@
                           RowHeight="31"
                           ColumnHeaderHeight="34"
                           BorderThickness="0"
+                          ScrollViewer.HorizontalScrollBarVisibility="Auto"
                           EnableRowVirtualization="True"
                           VirtualizingPanel.IsVirtualizing="True"
                           VirtualizingPanel.VirtualizationMode="Recycling">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="动作" Binding="{Binding [Action]}" SortMemberPath="Action" Width="78"/>
-                        <DataGridTextColumn Header="状态" Binding="{Binding [Status]}" SortMemberPath="Status" Width="120"/>
-                        <DataGridTextColumn Header="源路径名" Binding="{Binding [SourcePath]}" SortMemberPath="SourcePath" Width="2*"/>
-                        <DataGridTextColumn Header="目标路径名/文件名" Binding="{Binding [TargetPath]}" SortMemberPath="TargetPath" Width="3*"/>
-                        <DataGridTextColumn Header="异常状态" Binding="{Binding [Error]}" SortMemberPath="Error" Width="1.4*"/>
-                        <DataGridTextColumn Header="执行结果" Binding="{Binding [ExecDetails]}" SortMemberPath="ExecDetails" Width="1.4*"/>
+                        <DataGridTextColumn Header="动作" Binding="{Binding [Action]}" SortMemberPath="Action" Width="78"
+                                            ElementStyle="{StaticResource GridCellText}"/>
+                        <DataGridTextColumn Header="状态" Binding="{Binding [Status]}" SortMemberPath="Status" Width="120"
+                                            ElementStyle="{StaticResource GridCellText}"/>
+                        <DataGridTextColumn Header="源路径名" Binding="{Binding [SourcePath]}" SortMemberPath="SourcePath" Width="2*" MinWidth="180"
+                                            ElementStyle="{StaticResource GridCellText}"/>
+                        <DataGridTextColumn Header="目标路径名/文件名" Binding="{Binding [TargetPath]}" SortMemberPath="TargetPath" Width="3*" MinWidth="240"
+                                            ElementStyle="{StaticResource GridCellText}"/>
+                        <DataGridTemplateColumn Header="异常状态" SortMemberPath="Error" Width="1.4*" MinWidth="120">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <TextBlock Text="{Binding [Error]}" TextTrimming="CharacterEllipsis">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding [Error]}" Value="">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBlock Text="—">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding [Error]}" Value="">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="执行结果" SortMemberPath="ExecDetails" Width="1.4*" MinWidth="120">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <TextBlock Text="{Binding [ExecDetails]}" TextTrimming="CharacterEllipsis">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding [ExecDetails]}" Value="">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBlock Text="—">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding [ExecDetails]}" Value="">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 <DataGrid.RowStyle>
                     <Style TargetType="DataGridRow">
