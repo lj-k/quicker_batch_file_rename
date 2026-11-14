@@ -117,6 +117,24 @@ check("ApplySelectionDiff" in aux_text and "_loadedPaths" in aux_text and
 check("Window_Activated" in aux_text and "_selectionGuardTimer" in aux_text and
       "_layoutWorkerCount" in aux_text,
       "focus guard rechecks selection and avoids layout races")
+check("SelectionReaderLoop" in aux_text and "RequestSelectionRead" in aux_text and
+      "ApartmentState.STA" in aux_text,
+      "selection reading runs on a background STA thread")
+check("_selectionEventQueued" in aux_text and "SelectionBurstMaxWaitMs" in aux_text and
+      "Interlocked.CompareExchange(ref _selectionEventQueued" in aux_text,
+      "selection events merge into one pending callback with a max wait")
+check("DeferRefresh()" in aux_text and "AddFileBatchCore" in aux_text,
+      "bulk UI updates batch collection view refreshes")
+check("_hashDeferred" in aux_text and "ScheduleHashResume" in aux_text and
+      "IsSelectionActivityRecent" in aux_text,
+      "hash work is deferred while selection is active")
+check("RequestLayoutAfterScan" in aux_text and "_layoutDeferTimer" in aux_text and
+      "_layoutPending" in aux_text,
+      "layout recompute waits for selection activity to settle")
+check("_lastGuardTicks" in aux_text and "IsTextInputFocused" in aux_text,
+      "selection guard has cooldown and text-input skip")
+check("StopSelectionReader" in aux_text and "_hashResumeTimer" in aux_text,
+      "realtime selection reader and timers are cleaned up")
 check('x:Name="PresetListBox"' in xaml_text and 'MaxHeight="430"' in xaml_text,
       "preset list is tall enough for 15 rows")
 check("DeliveryMode != 2 && DeliveryMode != 3" in aux_text and "DeliveryMode == 2 || DeliveryMode == 3" in aux_text,
@@ -145,7 +163,7 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.19", "deployed code version is 0.06.19")
+check(dist_text.splitlines()[1] == "// 版本：0.06.20", "deployed code version is 0.06.20")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
@@ -175,7 +193,7 @@ check("TemplateNeedsHash" in dist_text, "deployed code caches template checksum 
 check("BitmapCacheOption.None" in dist_text, "deployed code reads EXIF metadata only")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.19" in core_text, "core source version is 0.06.19")
+check("// 版本：0.06.20" in core_text, "core source version is 0.06.20")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("preferExifOnFilenameConflict" in core_text, "core contains exif conflict config")
 check("BuildFlatPresetDictionary" in core_text, "core contains flat preset builder")
@@ -206,8 +224,8 @@ check("BuildPerfLine" in aux_text, "aux reports scan and layout performance")
 check("ClassifyPerformanceBottleneck" in core_text, "core classifies CPU/IO bottleneck")
 check("UpdatePerfText" in aux_text and "PerfText" in xaml_text,
       "aux wires performance text into the footer")
-check('// 版本：0.06.19' in aux_text, "aux source version is 0.06.19")
-check("XAML 版本：0.06.19" in xaml_text, "XAML version is 0.06.19")
+check('// 版本：0.06.20' in aux_text, "aux source version is 0.06.20")
+check("XAML 版本：0.06.20" in xaml_text, "XAML version is 0.06.20")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -230,8 +248,8 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.31" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.31")
+check("> 版本：0.0.32" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.32")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
@@ -239,10 +257,11 @@ check("预设变量未持久化排查" in req_text, "requirements includes prese
 check("预设变量直接赋值" in req_text, "requirements includes direct preset assignment")
 check("winContext.Context.SetVarValue" in req_text, "requirements includes direct SetVarValue")
 check("交互窗口与执行性能优化" in req_text, "requirements includes performance optimization")
+check("性能优化实施记录" in req_text, "requirements includes performance implementation record")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.19"),
-    ("doc/测试报告.md", "0.06.19"),
+    ("doc/开发说明.md", "0.06.20"),
+    ("doc/测试报告.md", "0.06.20"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -254,7 +273,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.19]" in changelog_text, "CHANGELOG has 0.06.19 entry")
+    check("[0.06.20]" in changelog_text, "CHANGELOG has 0.06.20 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -279,8 +298,8 @@ s3 = release / "方案3-重复获取+重命名+执行"
 for folder in [s1, s2, s3]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.19",
-          str(folder.name) + " Aux version 0.06.19")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.20",
+          str(folder.name) + " Aux version 0.06.20")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

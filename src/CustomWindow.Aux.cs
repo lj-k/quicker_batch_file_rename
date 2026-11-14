@@ -28,7 +28,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.19
+// 版本：0.06.20
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -89,6 +89,29 @@ private static int _layoutWorkerCount = 0;
 private static string _lastSelectionKey = "";
 private static IntPtr _selectionHook = IntPtr.Zero;
 private static WinEventDelegate _selectionHookDelegate;
+private static Thread _selectionReaderThread;
+private static readonly object _selectionReaderSync = new object();
+private static int _selectionReaderRequestId = 0;
+private static int _selectionReaderQueuedId = 0;
+private static IntPtr _selectionReaderPreferred = IntPtr.Zero;
+private static bool _selectionReaderManual = false;
+private static bool _selectionReaderForce = false;
+private static volatile bool _selectionReaderStop = false;
+private static int _selectionEventQueued = 0;
+private static bool _selectionBurstActive = false;
+private static int _selectionBurstStartTicks = 0;
+private static int _lastGuardTicks = 0;
+private static int _lastSelectionActivityTicks = 0;
+private static bool _hashDeferred = false;
+private static bool _layoutPending = false;
+private static DispatcherTimer _hashResumeTimer;
+private static DispatcherTimer _layoutDeferTimer;
+// 实时选择停止后，哈希延迟最多保留一段时间，避免异步事件把哈希无限推迟。
+private const int SelectionActivityWindowMs = 600;
+// 连续选择事件下最多等待 800ms 必须执行一次读取，避免防抖被无限顺延。
+private const int SelectionBurstMaxWaitMs = 800;
+// 布局在最后一次选择活动结束后再执行，避免与选择/扫描争抢UI线程。
+private const int LayoutQuietDelayMs = 350;
 private static TextBox _filterExtensionsText;
 private static ComboBox _filterModeCombo;
 private static Button _loadExtPresetButton;
@@ -416,6 +439,7 @@ private static void ResetRuntimeState()
     _skippedInvalid = 0;
     _lastCaret = null;
     _previewDirty = false;
+    _layoutPending = false;
     _scanPerfText = "";
     _layoutPerfText = "";
     _scanPerfStartTicks = 0;
@@ -429,6 +453,27 @@ private static void ResetRuntimeState()
     _templateHashCheckValue = false;
     _lastSelectionKey = "";
     RemoveSelectionHook();
+    StopSelectionReader();
+    _selectionEventQueued = 0;
+    _lastGuardTicks = 0;
+    _lastSelectionActivityTicks = 0;
+    _hashDeferred = false;
+    if (_hashResumeTimer != null)
+    {
+        _hashResumeTimer.Stop();
+        _hashResumeTimer = null;
+    }
+    if (_selectionApplyTimer != null)
+    {
+        _selectionApplyTimer.Stop();
+        _selectionApplyTimer = null;
+    }
+    if (_layoutDeferTimer != null)
+    {
+        _layoutDeferTimer.Stop();
+        _layoutDeferTimer = null;
+    }
+    _pendingSelectionDiff = null;
     _columnFilters.Clear();
     _activeHeaderFilterKey = "";
     if (_headerFilterPopup != null)
@@ -914,10 +959,15 @@ private static void Window_Deactivated(object sender, EventArgs e)
 }
 
 // 守门员：窗口重新获得焦点后，再核对一次输入与资源管理器选中项是否一致。
+// 1 秒冷却，扫描/布局/文本输入期间跳过，避免复核与用户操作互相干扰。
 private static void Window_Activated(object sender, EventArgs e)
 {
     if (!IsRealTimeSelectionEnabled() || _executing || _lastExplorerWindow == IntPtr.Zero)
         return;
+    int now = Environment.TickCount;
+    if (unchecked(now - _lastGuardTicks) < 1000)
+        return;
+    _lastGuardTicks = now;
     if (_selectionGuardTimer == null)
     {
         _selectionGuardTimer = new DispatcherTimer();
@@ -926,13 +976,32 @@ private static void Window_Activated(object sender, EventArgs e)
         {
             if (_selectionGuardTimer != null)
                 _selectionGuardTimer.Stop();
-            if (IsRealTimeSelectionEnabled() && !_executing && _window != null &&
-                _window.IsActive)
-                ApplyRealTimeSelection(true);
+            if (!IsRealTimeSelectionEnabled() || _executing || _window == null ||
+                !_window.IsActive)
+                return;
+            // 扫描/布局期间只顺延复核，不叠加新的选择读取。
+            if (_scanning || Thread.VolatileRead(ref _layoutWorkerCount) > 0)
+            {
+                if (_selectionGuardTimer != null)
+                {
+                    _selectionGuardTimer.Interval = TimeSpan.FromMilliseconds(800);
+                    _selectionGuardTimer.Start();
+                }
+                return;
+            }
+            if (IsTextInputFocused())
+                return;
+            ApplyRealTimeSelection(true);
         };
     }
+    _selectionGuardTimer.Interval = TimeSpan.FromMilliseconds(250);
     _selectionGuardTimer.Stop();
     _selectionGuardTimer.Start();
+}
+
+private static bool IsTextInputFocused()
+{
+    return Keyboard.FocusedElement is TextBoxBase;
 }
 
 private static void HeaderFilterPopup_KeyDown(object sender, KeyEventArgs e)
@@ -1633,6 +1702,15 @@ private static void AddInputPath(string rawPath)
         _paths.Add(fullPath);
 }
 
+// 已经由后台线程规范化并去重的路径直接入列表，避免UI线程重复执行 Path.GetFullPath。
+private static void AddNormalizedInputPath(string fullPath)
+{
+    if (fullPath == null || fullPath.Length == 0)
+        return;
+    if (_pathSet.Add(fullPath))
+        _paths.Add(fullPath);
+}
+
 private static void StartScan()
 {
     StartScanInternal(new List<string>(_paths), true);
@@ -1810,6 +1888,25 @@ private static void StartScanInternal(List<string> scanPaths, bool resetSkipped)
 
 private static void AddFileBatch(List<Dictionary<string, object>> batch)
 {
+    // 一批新增行只触发一次集合视图刷新，减少大批量追加时的布局开销。
+    if (_grid != null)
+    {
+        using (_grid.Items.DeferRefresh())
+        {
+            AddFileBatchCore(batch);
+        }
+    }
+    else
+    {
+        AddFileBatchCore(batch);
+    }
+    if (_scanning)
+        _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
+    UpdateGridFilterCount();
+}
+
+private static void AddFileBatchCore(List<Dictionary<string, object>> batch)
+{
     for (int i = 0; i < batch.Count; i++)
     {
         Dictionary<string, object> item = batch[i];
@@ -1819,9 +1916,6 @@ private static void AddFileBatch(List<Dictionary<string, object>> batch)
         _rows.Add(item);
         _loadedPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
     }
-    if (_scanning)
-        _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
-    UpdateGridFilterCount();
 }
 
 private static void FinishScan(int generation)
@@ -1849,8 +1943,44 @@ private static void FinishScan(int generation)
     // 日期已在 AddFileBatch 中逐项计算，这里不再全量重复计算。
     _previewDirty = false;
     UpdateRealTimeUi();
-    RecomputeAll();
-    ReapplyActiveSort();
+    // 布局可能被延迟到选择安静后；期间禁止执行并显示同步状态，避免用空目标路径操作。
+    _layoutPending = true;
+    SetApplyEnabled(false);
+    _statusText.Text = "正在计算目标路径…";
+    RequestLayoutAfterScan();
+}
+
+// 实时选择活动期间延迟整批布局，等选择安静后再计算，避免与选择/扫描争抢UI线程。
+private static void RequestLayoutAfterScan()
+{
+    if (!IsRealTimeSelectionEnabled() || !IsSelectionActivityRecent())
+    {
+        RecomputeAll();
+        ReapplyActiveSort();
+        return;
+    }
+    if (_layoutDeferTimer == null)
+    {
+        _layoutDeferTimer = new DispatcherTimer();
+        _layoutDeferTimer.Interval = TimeSpan.FromMilliseconds(LayoutQuietDelayMs);
+        _layoutDeferTimer.Tick += delegate(object sender, EventArgs e)
+        {
+            if (_layoutDeferTimer != null)
+                _layoutDeferTimer.Stop();
+            if (_window == null || _scanning)
+                return;
+            if (IsRealTimeSelectionEnabled() && IsSelectionActivityRecent())
+            {
+                if (_layoutDeferTimer != null)
+                    _layoutDeferTimer.Start();
+                return;
+            }
+            RecomputeAll();
+            ReapplyActiveSort();
+        };
+    }
+    _layoutDeferTimer.Stop();
+    _layoutDeferTimer.Start();
 }
 
 private static Dictionary<string, object> BuildFileItem(string path, out bool isDirectory)
@@ -2023,17 +2153,19 @@ private static bool TryParseExifDateText(string text, out DateTime result)
     return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out result);
 }
 
-private static void Post(Dispatcher dispatcher, Action action)
+private static bool Post(Dispatcher dispatcher, Action action)
 {
     if (dispatcher == null || action == null)
-        return;
+        return false;
     try
     {
         dispatcher.BeginInvoke(DispatcherPriority.Background, action);
+        return true;
     }
     catch
     {
         // 窗口已关闭时忽略。
+        return false;
     }
 }
 
@@ -2045,6 +2177,15 @@ private static void EnsureHashWorker()
 {
     if (_scanning || _files.Count == 0 || _window == null)
         return;
+
+    // 实时选择活动期间延迟哈希，避免增量扫描、布局与哈希同时争抢磁盘。
+    if (IsRealTimeSelectionEnabled() && IsSelectionActivityRecent())
+    {
+        _hashDeferred = true;
+        ScheduleHashResume();
+        return;
+    }
+    _hashDeferred = false;
 
     if (!TemplateNeedsHash(_config["template"]))
     {
@@ -2103,6 +2244,37 @@ private static void EnsureHashWorker()
     });
     thread.IsBackground = true;
     thread.Start();
+}
+
+private static bool IsSelectionActivityRecent()
+{
+    int last = Thread.VolatileRead(ref _lastSelectionActivityTicks);
+    if (last == 0)
+        return false;
+    return unchecked(Environment.TickCount - last) < SelectionActivityWindowMs;
+}
+
+// 活动停止后自动恢复被延迟的哈希；若仍在活动窗口内则继续顺延。
+private static void ScheduleHashResume()
+{
+    if (_window == null)
+        return;
+    if (_hashResumeTimer == null)
+    {
+        _hashResumeTimer = new DispatcherTimer();
+        _hashResumeTimer.Interval = TimeSpan.FromMilliseconds(500);
+        _hashResumeTimer.Tick += delegate(object sender, EventArgs e)
+        {
+            if (_hashResumeTimer != null)
+                _hashResumeTimer.Stop();
+            if (!_hashDeferred || _window == null)
+                return;
+            _hashDeferred = false;
+            EnsureHashWorker();
+        };
+    }
+    _hashResumeTimer.Stop();
+    _hashResumeTimer.Start();
 }
 
 private static string HashKey(string path, string algorithm)
@@ -2217,6 +2389,9 @@ private static void RecomputeAll(bool synchronous)
 {
     if (_grid == null || _scanning || _previewDirty || _executing)
         return;
+    if (_layoutDeferTimer != null)
+        _layoutDeferTimer.Stop();
+    _layoutPending = false;
 
     LayoutContext context = CreateLayoutContext();
     int generation = Interlocked.Increment(ref _recomputeGeneration);
@@ -2250,7 +2425,7 @@ private static void RecomputeAll(bool synchronous)
         {
             layouts = null;
         }
-        Post(dispatcher, delegate()
+        bool posted = Post(dispatcher, delegate()
         {
             Interlocked.Decrement(ref _layoutWorkerCount);
             if (layouts == null)
@@ -2262,6 +2437,8 @@ private static void RecomputeAll(bool synchronous)
                 UpdatePerfText();
             }
         });
+        if (!posted)
+            Interlocked.Decrement(ref _layoutWorkerCount);
     });
     thread.IsBackground = true;
     thread.Start();
@@ -2668,8 +2845,14 @@ private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
         RefreshRowDetails(item);
     }
 
-    _grid.Items.Refresh();
-    RefreshGridFilterIfActive();
+    // 行值变化不会触发属性通知：无筛选时刷新一次表格；有筛选时重建过滤即可。
+    if (IsGridFilterActive())
+        ApplyGridFilter();
+    else
+    {
+        _grid.Items.Refresh();
+        UpdateGridFilterCount();
+    }
     UpdateStatus();
     RefreshErrorBanner(context.TemplateValid ? null :
         (context.BadToken == null || context.BadToken.Length == 0
@@ -3241,18 +3424,138 @@ private static void RefreshSelection_Click(object sender, RoutedEventArgs e)
         return;
     }
 
-    bool explorerFound;
-    bool preferredFound;
-    List<string> selected = GetExplorerSelectedPaths(IntPtr.Zero,
-        out explorerFound, out preferredFound);
-    if (!explorerFound || selected.Count == 0)
+    RequestSelectionRead(true, false);
+    _statusText.Text = "正在读取资源管理器中选择的文件…";
+}
+
+// 后台STA读取资源管理器选择；同一时间只保留最新请求，UI线程不接触COM。
+private static void EnsureSelectionReader()
+{
+    if (_selectionReaderThread != null && _selectionReaderThread.IsAlive)
+        return;
+    _selectionReaderStop = false;
+    Thread thread = new Thread(SelectionReaderLoop);
+    thread.IsBackground = true;
+    thread.Name = "ExplorerSelectionReader";
+    try
     {
-        MessageBox.Show("未选中任何文件。", "重新获取选择的文件",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        thread.SetApartmentState(ApartmentState.STA);
+    }
+    catch
+    {
+    }
+    _selectionReaderThread = thread;
+    thread.Start();
+}
+
+private static void RequestSelectionRead(bool manual, bool forceCheck)
+{
+    EnsureSelectionReader();
+    lock (_selectionReaderSync)
+    {
+        _selectionReaderRequestId++;
+        _selectionReaderQueuedId = _selectionReaderRequestId;
+        _selectionReaderManual = manual;
+        _selectionReaderForce = forceCheck;
+        _selectionReaderPreferred = manual ? IntPtr.Zero : _lastExplorerWindow;
+        Monitor.Pulse(_selectionReaderSync);
+    }
+}
+
+private static void SelectionReaderLoop()
+{
+    Thread self = Thread.CurrentThread;
+    while (true)
+    {
+        int requestId;
+        IntPtr preferred;
+        bool manual;
+        bool forceCheck;
+        lock (_selectionReaderSync)
+        {
+            while (!_selectionReaderStop && _selectionReaderQueuedId == 0)
+                Monitor.Wait(_selectionReaderSync, 200);
+            if (_selectionReaderStop || !object.ReferenceEquals(_selectionReaderThread, self))
+                return;
+            requestId = _selectionReaderQueuedId;
+            preferred = _selectionReaderPreferred;
+            manual = _selectionReaderManual;
+            forceCheck = _selectionReaderForce;
+            _selectionReaderQueuedId = 0;
+        }
+
+        bool explorerFound;
+        bool preferredFound;
+        List<string> selected = GetExplorerSelectedPaths(preferred,
+            out explorerFound, out preferredFound);
+        List<string> normalized = NormalizeSelectedPaths(selected);
+        if (_selectionReaderStop || _window == null ||
+            !object.ReferenceEquals(_selectionReaderThread, self))
+            continue;
+        try
+        {
+            _window.Dispatcher.BeginInvoke(new Action(delegate()
+            {
+                HandleSelectionReadResult(requestId, normalized, explorerFound,
+                    preferredFound, manual, forceCheck);
+            }));
+        }
+        catch
+        {
+            // 窗口已关闭时忽略。
+        }
+    }
+}
+
+private static void HandleSelectionReadResult(int requestId, List<string> selected,
+    bool explorerFound, bool preferredFound, bool manual, bool forceCheck)
+{
+    if (_selectionReaderStop ||
+        requestId != Thread.VolatileRead(ref _selectionReaderRequestId))
+        return;
+
+    if (manual)
+    {
+        if (!explorerFound || selected.Count == 0)
+        {
+            _statusText.Text = "未选中任何文件";
+            MessageBox.Show("未选中任何文件。", "重新获取选择的文件",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        ReplaceInputSelection(selected, false);
         return;
     }
 
-    ReplaceInputSelection(selected, false);
+    if (!IsRealTimeSelectionEnabled() || _executing || _window == null)
+        return;
+    if (!explorerFound)
+        return;
+    if (_lastExplorerWindow != IntPtr.Zero && !preferredFound)
+        return;
+    if (!forceCheck && _window.IsActive)
+        return;
+    if (!forceCheck && !IsExplorerForeground())
+        return;
+
+    string key = BuildSelectionKey(selected);
+    if (key == _lastSelectionKey)
+        return;
+    _lastSelectionKey = key;
+    _lastSelectionActivityTicks = Environment.TickCount;
+    ApplySelectionDiff(selected, true);
+}
+
+private static void StopSelectionReader()
+{
+    lock (_selectionReaderSync)
+    {
+        _selectionReaderStop = true;
+        _selectionReaderQueuedId = 0;
+        _selectionReaderRequestId++;
+        _selectionReaderThread = null;
+        Monitor.PulseAll(_selectionReaderSync);
+    }
 }
 
 // 读取资源管理器窗口的选中项；优先读取指定窗口，否则合并所有资源管理器窗口。
@@ -3447,6 +3750,7 @@ private static void ReplaceInputSelection(List<string> selected, bool silent)
     _skippedFolders = 0;
     _skippedInvalid = 0;
     _previewDirty = false;
+    _layoutPending = false;
     _hashTotal = 0;
     _hashDone = 0;
     _progress.Visibility = Visibility.Collapsed;
@@ -3460,7 +3764,7 @@ private static void ReplaceInputSelection(List<string> selected, bool silent)
     RefreshErrorBanner("");
 
     for (int i = 0; i < selected.Count; i++)
-        AddInputPath(selected[i]);
+        AddNormalizedInputPath(selected[i]);
     _lastSelectionKey = BuildSelectionKey(_paths);
     PublishInputFiles();
 
@@ -3534,7 +3838,7 @@ private static List<string> NormalizeSelectedPaths(List<string> selected)
 }
 
 // 增量对比：只删除取消选中的行、只扫描新增文件；已加载行保留，避免整表重建。
-private static void ApplySelectionDiff(List<string> selected)
+private static void ApplySelectionDiff(List<string> selected, bool alreadyNormalized)
 {
     // 后台布局线程仍持有旧文件列表索引时先等待，避免边读边改。
     if (Thread.VolatileRead(ref _layoutWorkerCount) > 0)
@@ -3544,7 +3848,9 @@ private static void ApplySelectionDiff(List<string> selected)
         return;
     }
 
-    List<string> normalized = NormalizeSelectedPaths(selected);
+    List<string> normalized = alreadyNormalized
+        ? new List<string>(selected)
+        : NormalizeSelectedPaths(selected);
     HashSet<string> selectedSet = new HashSet<string>(normalized, StringComparer.OrdinalIgnoreCase);
 
     // 取消正在进行的扫描/哈希/布局，避免旧任务向新列表追加数据。
@@ -3568,6 +3874,7 @@ private static void ApplySelectionDiff(List<string> selected)
     _progress.Visibility = Visibility.Collapsed;
 
     // 删除已加载但不再选中的行；未加载的路径只需从路径列表移除。
+    // 批量删除期间挂起集合视图刷新，避免每删一行触发一次全表重排。
     Dictionary<string, Dictionary<string, object>> loadedItems =
         new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
     for (int i = 0; i < _files.Count; i++)
@@ -3582,15 +3889,21 @@ private static void ApplySelectionDiff(List<string> selected)
         if (!selectedSet.Contains(loadedPath))
             removed.Add(loadedPath);
     }
-    for (int i = 0; i < removed.Count; i++)
+    if (removed.Count > 0)
     {
-        Dictionary<string, object> item;
-        if (loadedItems.TryGetValue(removed[i], out item))
+        using (_grid.Items.DeferRefresh())
         {
-            _files.Remove(item);
-            _rows.Remove(item);
+            for (int i = 0; i < removed.Count; i++)
+            {
+                Dictionary<string, object> item;
+                if (loadedItems.TryGetValue(removed[i], out item))
+                {
+                    _files.Remove(item);
+                    _rows.Remove(item);
+                }
+                _loadedPaths.Remove(removed[i]);
+            }
         }
-        _loadedPaths.Remove(removed[i]);
     }
 
     _paths = new List<string>(normalized);
@@ -3606,14 +3919,23 @@ private static void ApplySelectionDiff(List<string> selected)
 
     PublishInputFiles();
     RefreshErrorBanner("");
-    ApplyGridFilter();
+    // 筛选激活时才重建过滤；无筛选时只更新计数，避免无条件全表刷新。
+    RefreshGridFilterIfActive();
     UpdateStatus();
 
     if (missing.Count == 0)
     {
-        _grid.Items.Refresh();
         ReapplyActiveSort();
         UpdateGridFilterCount();
+        // 删除会改变批内重复与目标冲突结果；上次布局被中断时也在这里补算。
+        if (removed.Count > 0 || _layoutPending)
+        {
+            SetApplyEnabled(false);
+            _statusText.Text = "正在计算目标路径…";
+            RequestLayoutAfterScan();
+        }
+        // 差异更新可能中断了在途哈希；若模板需要校验码则重新调度（活动期内会自动顺延）。
+        EnsureHashWorker();
         return;
     }
 
@@ -3651,7 +3973,7 @@ private static void EnsureSelectionApplyTimer()
             List<string> pending = _pendingSelectionDiff;
             _pendingSelectionDiff = null;
             if (pending != null && IsRealTimeSelectionEnabled())
-                ApplySelectionDiff(pending);
+                ApplySelectionDiff(pending, true);
         };
     }
     _selectionApplyTimer.Stop();
@@ -3670,12 +3992,19 @@ private static void RealTimeSelectionCheck_Changed(object sender, RoutedEventArg
     if (IsRealTimeSelectionEnabled())
     {
         _lastSelectionKey = BuildSelectionKey(_paths);
+        _lastGuardTicks = 0;
         InstallSelectionHook();
     }
     else
     {
         RemoveSelectionHook();
         _lastExplorerWindow = IntPtr.Zero;
+        // 关闭实时获取后立即恢复被延迟的校验码计算。
+        if (_hashDeferred)
+        {
+            _hashDeferred = false;
+            EnsureHashWorker();
+        }
     }
 }
 
@@ -3718,6 +4047,9 @@ private static void RemoveSelectionHook()
     if (_selectionApplyTimer != null)
         _selectionApplyTimer.Stop();
     _pendingSelectionDiff = null;
+    _selectionBurstActive = false;
+    _selectionBurstStartTicks = 0;
+    Interlocked.Exchange(ref _selectionEventQueued, 0);
     StopSelectionFallbackTimer();
 }
 
@@ -3738,12 +4070,31 @@ private static void ScheduleRealTimeSelectionRefresh()
 {
     if (_window == null)
         return;
+    // 事件风暴合并：同一时间只挂起一个 Dispatcher 回调，其余事件直接丢弃。
+    if (Interlocked.CompareExchange(ref _selectionEventQueued, 1, 0) != 0)
+        return;
+    Interlocked.Exchange(ref _lastSelectionActivityTicks, Environment.TickCount);
+    bool posted;
     try
     {
         _window.Dispatcher.BeginInvoke(new Action(delegate()
         {
+            Interlocked.Exchange(ref _selectionEventQueued, 0);
             if (!IsRealTimeSelectionEnabled() || _executing || _window == null)
                 return;
+            // 选择活动开始时暂停在途哈希，安静后由 ScheduleHashResume 补算缺失项。
+            if (_hashRunning)
+            {
+                _hashGeneration++;
+                _hashStop = true;
+                _hashRunning = false;
+                _hashAlgorithm = "";
+                _hashTotal = 0;
+                _hashDone = 0;
+                _progress.Visibility = Visibility.Collapsed;
+                _hashDeferred = true;
+                ScheduleHashResume();
+            }
             if (_selectionDebounceTimer == null)
             {
                 _selectionDebounceTimer = new DispatcherTimer();
@@ -3752,17 +4103,35 @@ private static void ScheduleRealTimeSelectionRefresh()
                 {
                     if (_selectionDebounceTimer != null)
                         _selectionDebounceTimer.Stop();
+                    _selectionBurstActive = false;
+                    _selectionBurstStartTicks = 0;
                     ApplyRealTimeSelection(false);
                 };
             }
+            // 350ms 防抖 + 800ms 最大等待：连续事件只顺延到上限为止。
+            int now = Environment.TickCount;
+            if (!_selectionBurstActive)
+            {
+                _selectionBurstActive = true;
+                _selectionBurstStartTicks = now;
+            }
+            int elapsed = unchecked(now - _selectionBurstStartTicks);
+            int remaining = SelectionBurstMaxWaitMs - elapsed;
+            int interval = remaining < 350 ? remaining : 350;
+            if (interval < 50)
+                interval = 50;
+            _selectionDebounceTimer.Interval = TimeSpan.FromMilliseconds(interval);
             _selectionDebounceTimer.Stop();
             _selectionDebounceTimer.Start();
         }));
+        posted = true;
     }
     catch
     {
-        // 窗口已关闭或Dispatcher已停止时忽略。
+        posted = false;
     }
+    if (!posted)
+        Interlocked.Exchange(ref _selectionEventQueued, 0);
 }
 
 private static void ApplyRealTimeSelection(bool forceCheck)
@@ -3775,20 +4144,8 @@ private static void ApplyRealTimeSelection(bool forceCheck)
     if (!forceCheck && !IsExplorerForeground())
         return;
 
-    bool explorerFound;
-    bool preferredFound;
-    List<string> selected = GetExplorerSelectedPaths(_lastExplorerWindow,
-        out explorerFound, out preferredFound);
-    if (!explorerFound)
-        return;
-    if (_lastExplorerWindow != IntPtr.Zero && !preferredFound)
-        return;
-
-    string key = BuildSelectionKey(selected);
-    if (key == _lastSelectionKey)
-        return;
-    _lastSelectionKey = key;
-    ApplySelectionDiff(selected);
+    // 资源管理器 COM 读取放在后台 STA 线程，UI 线程只负责判断与接收结果。
+    RequestSelectionRead(false, forceCheck);
 }
 
 private static void StartSelectionFallbackTimer()
@@ -5701,6 +6058,22 @@ private static void Window_Closed(object sender, EventArgs e)
     _execStop = true;
     _executing = false;
     RemoveSelectionHook();
+    StopSelectionReader();
+    _selectionEventQueued = 0;
+    _lastGuardTicks = 0;
+    _lastSelectionActivityTicks = 0;
+    _hashDeferred = false;
+    _layoutPending = false;
+    if (_hashResumeTimer != null)
+    {
+        _hashResumeTimer.Stop();
+        _hashResumeTimer = null;
+    }
+    if (_layoutDeferTimer != null)
+    {
+        _layoutDeferTimer.Stop();
+        _layoutDeferTimer = null;
+    }
     StopExecutionTimer();
     if (_debounceTimer != null)
     {
