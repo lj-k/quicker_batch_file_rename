@@ -81,6 +81,35 @@ public static class TestHarness
         }
     }
 
+    // 文件流哈希：覆盖读缓冲区与 BLAKE3 分块边界。
+    private static void TestHashStreamBoundaries()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "qk-hash-" + Guid.NewGuid().ToString("N") + ".bin");
+        int[] sizes = new int[] { 0, 1, 63, 64, 65, 1023, 1024, 1025, 81919, 81920, 81921 };
+        string[] algorithms = new string[] { "CRC32", "MD5", "SHA-256", "BLAKE3" };
+        try
+        {
+            for (int s = 0; s < sizes.Length; s++)
+            {
+                byte[] data = MakePattern(sizes[s]);
+                File.WriteAllBytes(path, data);
+                for (int a = 0; a < algorithms.Length; a++)
+                {
+                    string error;
+                    string fromBytes = CoreUnderTest.ComputeHashHexFromBytes(data, algorithms[a], out error);
+                    string fromStream = CoreUnderTest.ComputeHashHex(path, algorithms[a], out error);
+                    CheckEqual(fromBytes, fromStream,
+                        "hash stream: " + algorithms[a] + " len=" + sizes[s]);
+                }
+            }
+        }
+        finally
+        {
+            try { File.Delete(path); }
+            catch { }
+        }
+    }
+
     private static void TestFilenameDate()
     {
         DateTime date;
@@ -338,6 +367,27 @@ public static class TestHarness
             out effective, out source, out missing, out skipped);
         Check(effective == new DateTime(2020, 1, 2) && source == "filename",
             "date resolve: keep filename when exif missing");
+
+        // 四值重载：批量刷新日期时不再为每行构造 Dictionary。
+        CoreUnderTest.ResolveDateValue(new DateTime(2020, 1, 2),
+            new DateTime(2020, 6, 15, 10, 30, 0), null, null,
+            "filename", "filename,exif,modified,created,empty", "", true,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15, 10, 30, 0) && source == "exif",
+            "date resolve values: prefer exif on conflict");
+
+        CoreUnderTest.ResolveDateValue(new DateTime(2020, 1, 2),
+            new DateTime(2020, 6, 15), new DateTime(2021, 1, 1), new DateTime(2019, 1, 1),
+            "modified", "filename,exif,modified,created,empty", "", false,
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2021, 1, 1) && source == "modified",
+            "date resolve values: primary modified");
+
+        CoreUnderTest.ResolveDateValue(null, null, null, null,
+            "filename", "custom,empty,empty,empty,empty", "缺失文本", false,
+            out effective, out source, out missing, out skipped);
+        Check(!effective.HasValue && source == "custom" && missing == "缺失文本",
+            "date resolve values: custom fallback");
     }
 
     private static void TestFilter()
@@ -797,6 +847,7 @@ public static class TestHarness
         Console.OutputEncoding = Encoding.UTF8;
         TestStandardHashes();
         TestBlake3();
+        TestHashStreamBoundaries();
         TestFilenameDate();
         TestChecksumBadge();
         TestTemplateAndPath();

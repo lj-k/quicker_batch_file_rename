@@ -11,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.6
+// 版本：0.06.7
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -56,6 +56,28 @@ private const uint Blake3ChunkStart = 1U;
 private const uint Blake3ChunkEnd = 2U;
 private const uint Blake3Parent = 4U;
 private const uint Blake3Root = 8U;
+
+// BLAKE3 压缩使用线程内复用的临时缓冲区，避免每个 64 字节块分配数组。
+[ThreadStatic] private static uint[] _blake3State;
+[ThreadStatic] private static uint[] _blake3Message;
+[ThreadStatic] private static uint[] _blake3Permuted;
+[ThreadStatic] private static uint[] _blake3Block;
+[ThreadStatic] private static uint[] _blake3LastBlock;
+[ThreadStatic] private static uint[] _blake3Cv;
+[ThreadStatic] private static uint[] _blake3Output;
+
+private static void EnsureBlake3Scratch()
+{
+    if (_blake3State != null)
+        return;
+    _blake3State = new uint[16];
+    _blake3Message = new uint[16];
+    _blake3Permuted = new uint[16];
+    _blake3Block = new uint[16];
+    _blake3LastBlock = new uint[16];
+    _blake3Cv = new uint[8];
+    _blake3Output = new uint[16];
+}
 
 private static uint[] _crc32Table = null;
 private static readonly object _crc32TableLock = new object();
@@ -184,76 +206,108 @@ public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
     out DateTime? effectiveDate, out string effectiveSource,
     out string missingText, out bool skipped)
 {
+    if (dates == null)
+    {
+        effectiveDate = null;
+        effectiveSource = "empty";
+        missingText = "";
+        skipped = false;
+        return;
+    }
+
+    DateTime? filenameDate;
+    DateTime? exifDate;
+    DateTime? modifiedDate;
+    DateTime? createdDate;
+    dates.TryGetValue("filename", out filenameDate);
+    dates.TryGetValue("exif", out exifDate);
+    dates.TryGetValue("modified", out modifiedDate);
+    dates.TryGetValue("created", out createdDate);
+
+    ResolveDateValue(filenameDate, exifDate, modifiedDate, createdDate,
+        primarySource, fallbackOrder, customText, preferExifOnFilenameConflict,
+        out effectiveDate, out effectiveSource, out missingText, out skipped);
+}
+
+// 四值重载：批量刷新日期时避免为每一行分配 Dictionary。
+public static void ResolveDateValue(DateTime? filenameDate, DateTime? exifDate,
+    DateTime? modifiedDate, DateTime? createdDate,
+    string primarySource, string fallbackOrder, string customText,
+    bool preferExifOnFilenameConflict,
+    out DateTime? effectiveDate, out string effectiveSource,
+    out string missingText, out bool skipped)
+{
     effectiveDate = null;
     effectiveSource = "";
     missingText = "";
     skipped = false;
 
-    if (dates != null)
-    {
-        string primary = NormalizeDateSource(primarySource);
-        DateTime? filenameDate = null;
-        DateTime? exifDate = null;
-        bool hasFilenameExifConflict = false;
-        if (preferExifOnFilenameConflict &&
-            dates.TryGetValue("filename", out filenameDate) && filenameDate.HasValue &&
-            dates.TryGetValue("exif", out exifDate) && exifDate.HasValue &&
-            filenameDate.Value.Date != exifDate.Value.Date)
-        {
-            hasFilenameExifConflict = true;
-        }
+    string primary = NormalizeDateSource(primarySource);
+    bool hasFilenameExifConflict = preferExifOnFilenameConflict &&
+        filenameDate.HasValue && exifDate.HasValue &&
+        filenameDate.Value.Date != exifDate.Value.Date;
 
-        DateTime? value;
-        if (dates.TryGetValue(primary, out value) && value.HasValue)
+    DateTime? value = GetDateBySource(primary, filenameDate, exifDate, modifiedDate, createdDate);
+    if (value.HasValue)
+    {
+        if (primary == "filename" && hasFilenameExifConflict)
         {
-            if (primary == "filename" && hasFilenameExifConflict)
+            effectiveDate = exifDate;
+            effectiveSource = "exif";
+            return;
+        }
+        effectiveDate = value;
+        effectiveSource = primary;
+        return;
+    }
+
+    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+    for (int i = 0; i < order.Length; i++)
+    {
+        string token = order[i];
+        if (token == "empty")
+        {
+            effectiveSource = "empty";
+            return;
+        }
+        if (token == "custom")
+        {
+            effectiveSource = "custom";
+            missingText = customText == null ? "" : customText;
+            return;
+        }
+        if (token == "skip")
+        {
+            effectiveSource = "skip";
+            skipped = true;
+            return;
+        }
+        value = GetDateBySource(token, filenameDate, exifDate, modifiedDate, createdDate);
+        if (value.HasValue)
+        {
+            if (token == "filename" && hasFilenameExifConflict)
             {
                 effectiveDate = exifDate;
                 effectiveSource = "exif";
                 return;
             }
             effectiveDate = value;
-            effectiveSource = primary;
+            effectiveSource = token;
             return;
-        }
-
-        string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
-        for (int i = 0; i < order.Length; i++)
-        {
-            string token = order[i];
-            if (token == "empty")
-            {
-                effectiveSource = "empty";
-                return;
-            }
-            if (token == "custom")
-            {
-                effectiveSource = "custom";
-                missingText = customText == null ? "" : customText;
-                return;
-            }
-            if (token == "skip")
-            {
-                effectiveSource = "skip";
-                skipped = true;
-                return;
-            }
-            if (dates.TryGetValue(token, out value) && value.HasValue)
-            {
-                if (token == "filename" && hasFilenameExifConflict)
-                {
-                    effectiveDate = exifDate;
-                    effectiveSource = "exif";
-                    return;
-                }
-                effectiveDate = value;
-                effectiveSource = token;
-                return;
-            }
         }
     }
 
     effectiveSource = "empty";
+}
+
+private static DateTime? GetDateBySource(string source, DateTime? filenameDate,
+    DateTime? exifDate, DateTime? modifiedDate, DateTime? createdDate)
+{
+    if (source == "filename") return filenameDate;
+    if (source == "exif") return exifDate;
+    if (source == "modified") return modifiedDate;
+    if (source == "created") return createdDate;
+    return null;
 }
 
 public static string NormalizeExtensionList(string value)
@@ -1240,6 +1294,7 @@ private static string ToHex(byte[] data)
 
 private static string ComputeBlake3Hex(Stream stream)
 {
+    EnsureBlake3Scratch();
     byte[] chunk = new byte[1024];
     int chunkLength = 0;
     ulong chunkCounter = 0;
@@ -1268,15 +1323,17 @@ private static string ComputeBlake3Hex(Stream stream)
     }
 
     uint[] inputCv;
-    uint[] blockWords;
-    uint blockLength;
-    uint flags;
-    Blake3ChunkOutput(chunk, chunkLength, chunkCounter, out inputCv, out blockWords, out blockLength, out flags);
+    uint[] lastBlock;
+    uint lastBlockLength;
+    uint lastFlags;
+    Blake3ChunkOutput(chunk, chunkLength, chunkCounter, out inputCv, out lastBlock,
+        out lastBlockLength, out lastFlags);
 
+    uint[] compressed = _blake3Output;
     ulong outputCounter = chunkCounter;
     while (stack.Count > 0)
     {
-        uint[] compressed = Blake3Compress(inputCv, blockWords, outputCounter, blockLength, flags);
+        Blake3Compress(inputCv, lastBlock, outputCounter, lastBlockLength, lastFlags, compressed);
         uint[] rightCv = new uint[8];
         Array.Copy(compressed, rightCv, 8);
 
@@ -1287,18 +1344,18 @@ private static string ComputeBlake3Hex(Stream stream)
         Array.Copy(leftCv, 0, parentBlock, 0, 8);
         Array.Copy(rightCv, 0, parentBlock, 8, 8);
 
-        inputCv = (uint[])Blake3Iv.Clone();
-        blockWords = parentBlock;
-        blockLength = 64;
-        flags = Blake3Parent;
+        inputCv = Blake3Iv;
+        lastBlock = parentBlock;
+        lastBlockLength = 64;
+        lastFlags = Blake3Parent;
         outputCounter = 0;
     }
 
-    uint[] root = Blake3Compress(inputCv, blockWords, 0, blockLength, flags | Blake3Root);
+    Blake3Compress(inputCv, lastBlock, 0, lastBlockLength, lastFlags | Blake3Root, compressed);
     byte[] output = new byte[32];
     for (int i = 0; i < 8; i++)
     {
-        uint word = root[i];
+        uint word = compressed[i];
         output[i * 4] = (byte)(word & 0xFFU);
         output[i * 4 + 1] = (byte)((word >> 8) & 0xFFU);
         output[i * 4 + 2] = (byte)((word >> 16) & 0xFFU);
@@ -1309,52 +1366,68 @@ private static string ComputeBlake3Hex(Stream stream)
 
 private static uint[] Blake3ChunkCv(byte[] chunk, int length, ulong chunkCounter)
 {
-    uint[] inputCv;
-    uint[] blockWords;
-    uint blockLength;
-    uint flags;
-    Blake3ChunkOutput(chunk, length, chunkCounter, out inputCv, out blockWords, out blockLength, out flags);
-    uint[] compressed = Blake3Compress(inputCv, blockWords, chunkCounter, blockLength, flags);
-    uint[] cv = new uint[8];
-    Array.Copy(compressed, cv, 8);
-    return cv;
+    uint[] cv;
+    uint[] lastBlock;
+    uint lastBlockLength;
+    uint lastFlags;
+    Blake3ChunkOutput(chunk, length, chunkCounter, out cv, out lastBlock,
+        out lastBlockLength, out lastFlags);
+
+    uint[] compressed = _blake3Output;
+    Blake3Compress(cv, lastBlock, chunkCounter, lastBlockLength, lastFlags, compressed);
+
+    uint[] result = new uint[8];
+    Array.Copy(compressed, result, 8);
+    return result;
 }
 
 private static void Blake3ChunkOutput(byte[] chunk, int length, ulong chunkCounter,
-    out uint[] inputCv, out uint[] blockWords, out uint blockLength, out uint flags)
+    out uint[] inputCv, out uint[] lastBlock, out uint lastBlockLength, out uint lastFlags)
 {
-    uint[] cv = (uint[])Blake3Iv.Clone();
+    EnsureBlake3Scratch();
+    uint[] cv = _blake3Cv;
+    for (int i = 0; i < 8; i++)
+        cv[i] = Blake3Iv[i];
+
+    uint[] block = _blake3Block;
+    uint[] compressed = _blake3Output;
+    int blockCount = length <= 0 ? 1 : (length + 63) / 64;
     int offset = 0;
-    while (true)
+
+    for (int blockIndex = 0; blockIndex < blockCount; blockIndex++)
     {
         int remaining = length - offset;
         if (remaining > 64) remaining = 64;
         if (remaining < 0) remaining = 0;
 
-        uint[] block = new uint[16];
+        for (int i = 0; i < 16; i++)
+            block[i] = 0;
         for (int i = 0; i < remaining; i++)
-        {
             block[i / 4] |= (uint)chunk[offset + i] << ((i % 4) * 8);
-        }
 
         uint blockFlags = (offset == 0 ? Blake3ChunkStart : 0U);
-        bool isLast = (offset + remaining >= length);
+        bool isLast = (blockIndex == blockCount - 1);
         if (isLast)
         {
             blockFlags |= Blake3ChunkEnd;
+            Array.Copy(block, _blake3LastBlock, 16);
             inputCv = cv;
-            blockWords = block;
-            blockLength = (uint)remaining;
-            flags = blockFlags;
+            lastBlock = _blake3LastBlock;
+            lastBlockLength = (uint)remaining;
+            lastFlags = blockFlags;
             return;
         }
 
-        uint[] compressed = Blake3Compress(cv, block, chunkCounter, (uint)remaining, blockFlags);
-        uint[] nextCv = new uint[8];
-        Array.Copy(compressed, nextCv, 8);
-        cv = nextCv;
+        Blake3Compress(cv, block, chunkCounter, (uint)remaining, blockFlags, compressed);
+        for (int i = 0; i < 8; i++)
+            cv[i] = compressed[i];
         offset += remaining;
     }
+
+    inputCv = cv;
+    lastBlock = _blake3LastBlock;
+    lastBlockLength = 0;
+    lastFlags = Blake3ChunkStart | Blake3ChunkEnd;
 }
 
 private static void Blake3AddChunkCv(List<uint[]> stack, uint[] cv, ulong totalChunks)
@@ -1363,26 +1436,36 @@ private static void Blake3AddChunkCv(List<uint[]> stack, uint[] cv, ulong totalC
     {
         uint[] left = stack[stack.Count - 1];
         stack.RemoveAt(stack.Count - 1);
-        cv = Blake3ParentCv(left, cv);
+        Blake3ParentCv(left, cv, left);
+        cv = left;
         totalChunks >>= 1;
     }
     stack.Add(cv);
 }
 
-private static uint[] Blake3ParentCv(uint[] left, uint[] right)
+private static void Blake3ParentCv(uint[] left, uint[] right, uint[] destination)
 {
-    uint[] block = new uint[16];
-    Array.Copy(left, 0, block, 0, 8);
-    Array.Copy(right, 0, block, 8, 8);
-    uint[] compressed = Blake3Compress(Blake3Iv, block, 0, 64, Blake3Parent);
-    uint[] cv = new uint[8];
-    Array.Copy(compressed, cv, 8);
-    return cv;
+    EnsureBlake3Scratch();
+    uint[] block = _blake3Block;
+    for (int i = 0; i < 8; i++)
+    {
+        block[i] = left[i];
+        block[i + 8] = right[i];
+    }
+
+    Blake3Compress(Blake3Iv, block, 0, 64, Blake3Parent, _blake3Output);
+    for (int i = 0; i < 8; i++)
+        destination[i] = _blake3Output[i];
 }
 
-private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uint blockLength, uint flags)
+private static void Blake3Compress(uint[] cv, uint[] block, ulong counter,
+    uint blockLength, uint flags, uint[] output)
 {
-    uint[] state = new uint[16];
+    EnsureBlake3Scratch();
+    uint[] state = _blake3State;
+    uint[] message = _blake3Message;
+    uint[] permuted = _blake3Permuted;
+
     for (int i = 0; i < 8; i++)
         state[i] = cv[i];
     state[8] = Blake3Iv[0];
@@ -1394,7 +1477,6 @@ private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uin
     state[14] = blockLength;
     state[15] = flags;
 
-    uint[] message = new uint[16];
     Array.Copy(block, message, 16);
 
     for (int round = 0; round < 7; round++)
@@ -1410,20 +1492,17 @@ private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uin
 
         if (round != 6)
         {
-            uint[] permuted = new uint[16];
             for (int i = 0; i < 16; i++)
                 permuted[i] = message[Blake3Permutation[i]];
-            message = permuted;
+            Array.Copy(permuted, message, 16);
         }
     }
 
-    uint[] output = new uint[16];
     for (int i = 0; i < 8; i++)
     {
         output[i] = state[i] ^ state[i + 8];
         output[i + 8] = state[i + 8] ^ cv[i];
     }
-    return output;
 }
 
 private static void Blake3G(uint[] state, int a, int b, int c, int d, uint mx, uint my)

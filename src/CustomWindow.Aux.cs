@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.6
+// 版本：0.06.7
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -92,6 +92,10 @@ private static Dictionary<string, string> _hashCache = new Dictionary<string, st
 private static readonly object _hashLock = new object();
 private static readonly Regex EditorTokenRegex = new Regex("【[^】]*】", RegexOptions.Compiled);
 
+// 模板是否包含【校验码】的结果缓存：模板不变时避免每行重复执行正则。
+private static string _templateHashCheckKey = null;
+private static bool _templateHashCheckValue = false;
+
 private static DispatcherTimer _debounceTimer;
 private static TextPointer _lastCaret;
 private static bool _suppressEvents = false;
@@ -122,6 +126,16 @@ private static long _execStartTicks = 0;
 private static List<Dictionary<string, object>> _execQueue = new List<Dictionary<string, object>>();
 private static DispatcherTimer _execTimer = null;
 private static readonly object _execRowLock = new object();
+// 执行期间的界面刷新合并到定时器，避免每个文件一次全量 Items.Refresh。
+private static bool _execUiDirty = false;
+private static readonly object _execDirLock = new object();
+private static readonly HashSet<string> _execDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+private static string _execAlgorithm = "CRC32";
+private static int _execDigits = 8;
+private static string _execPrefix = "";
+private static string _execSuffix = "";
+private static bool _execVerifyEnabled = true;
+private static bool _execTemplateNeedsHash = false;
 
 private static readonly string[] ExifExtensions = new string[] {
     ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp", ".gif", ".heic", ".heif", ".webp"
@@ -808,7 +822,7 @@ private static void ApplyUiConfig()
     string oldRealTime = GetConfigString(_config, "realTimePreview", "true");
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
-    bool oldNeedsHash = TemplateContainsToken(GetConfigString(_config, "template", DefaultTemplate), "【校验码】");
+    bool oldNeedsHash = TemplateNeedsHash(GetConfigString(_config, "template", DefaultTemplate));
 
     ReadConfigFromUi();
 
@@ -837,7 +851,7 @@ private static void ApplyUiConfig()
     if (_scanning)
         return;
 
-    bool newNeedsHash = TemplateContainsToken(_config["template"], "【校验码】");
+    bool newNeedsHash = TemplateNeedsHash(_config["template"]);
     if (oldNeedsHash && !newNeedsHash)
     {
         _hashGeneration++;
@@ -939,17 +953,13 @@ private static void RefreshEffectiveDates(bool recomputeTarget)
 
 private static void UpdateEffectiveDate(Dictionary<string, object> item)
 {
-    Dictionary<string, DateTime?> dates = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
-    dates["filename"] = GetDate(item, "FileNameDate");
-    dates["exif"] = GetDate(item, "ExifDate");
-    dates["modified"] = GetDate(item, "Modified");
-    dates["created"] = GetDate(item, "Created");
-
     DateTime? effectiveDate;
     string effectiveSource;
     string missingText;
     bool skipped;
-    ResolveDateValue(dates, _config["dateSource"], _config["dateFallbackOrder"],
+    ResolveDateValue(GetDate(item, "FileNameDate"), GetDate(item, "ExifDate"),
+        GetDate(item, "Modified"), GetDate(item, "Created"),
+        _config["dateSource"], _config["dateFallbackOrder"],
         _config["dateFallbackCustomText"],
         GetConfigBool(_config, "preferExifOnFilenameConflict", false),
         out effectiveDate, out effectiveSource, out missingText, out skipped);
@@ -1217,8 +1227,9 @@ private static DateTime? TryReadExifDate(string path)
     {
         using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
         {
+            // 仅读取元数据，不解码像素；大图片扫描时可显著降低内存与 CPU 开销。
             BitmapDecoder decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile,
-                BitmapCacheOption.OnLoad);
+                BitmapCacheOption.None);
             if (decoder.Frames.Count == 0)
                 return null;
             BitmapMetadata metadata = decoder.Frames[0].Metadata as BitmapMetadata;
@@ -1305,7 +1316,7 @@ private static void EnsureHashWorker()
     if (_scanning || _files.Count == 0 || _window == null)
         return;
 
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!TemplateNeedsHash(_config["template"]))
     {
         _hashTotal = 0;
         _hashDone = 0;
@@ -1318,13 +1329,16 @@ private static void EnsureHashWorker()
         return;
 
     List<string> missing = new List<string>();
-    for (int i = 0; i < _files.Count; i++)
+    lock (_hashLock)
     {
-        if (GetBool(_files[i], "IsSkipped"))
-            continue;
-        string path = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
-        if (!IsHashCached(path, algorithm))
-            missing.Add(path);
+        for (int i = 0; i < _files.Count; i++)
+        {
+            if (GetBool(_files[i], "IsSkipped"))
+                continue;
+            string path = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
+            if (!_hashCache.ContainsKey(HashKey(path, algorithm)))
+                missing.Add(path);
+        }
     }
 
     if (missing.Count == 0)
@@ -1392,6 +1406,7 @@ private static void HashWorker(int generation, string algorithm, List<string> pa
 {
     try
     {
+        long lastPostTicks = 0;
         for (int i = 0; i < paths.Count; i++)
         {
             if (_hashStop || generation != _hashGeneration)
@@ -1408,8 +1423,11 @@ private static void HashWorker(int generation, string algorithm, List<string> pa
                 return;
 
             _hashDone++;
-            if (_hashDone % 5 == 0 || _hashDone >= _hashTotal)
+            long nowTicks = DateTime.UtcNow.Ticks;
+            if (_hashDone >= _hashTotal ||
+                nowTicks - lastPostTicks >= TimeSpan.TicksPerMillisecond * 120)
             {
+                lastPostTicks = nowTicks;
                 Post(dispatcher, delegate()
                 {
                     if (generation == _hashGeneration)
@@ -1464,7 +1482,7 @@ private static void RecomputeAll()
     string template = _config["template"];
     string badToken;
     bool templateValid = ValidateTemplateTokens(template, out badToken);
-    bool needsHash = TemplateContainsToken(template, "【校验码】");
+    bool needsHash = TemplateNeedsHash(template);
 
     string algorithm = _config["checksumAlgorithm"];
     int digits = GetConfigInt(_config, "checksumDigits", 8);
@@ -1687,6 +1705,17 @@ private static void RefreshRowDetails(Dictionary<string, object> item)
     item["Details"] = BuildDetails(item);
 }
 
+private static bool TemplateNeedsHash(string template)
+{
+    if (template == null)
+        template = "";
+    if (_templateHashCheckKey == template)
+        return _templateHashCheckValue;
+    _templateHashCheckValue = TemplateContainsToken(template, "【校验码】");
+    _templateHashCheckKey = template;
+    return _templateHashCheckValue;
+}
+
 private static void SetRowError(Dictionary<string, object> item, string message, string status)
 {
     item["HasError"] = true;
@@ -1724,7 +1753,7 @@ private static string BuildDetails(Dictionary<string, object> item)
     builder.AppendLine("扩展名：" + Convert.ToString(item["Ext"], CultureInfo.InvariantCulture));
 
     string hash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!TemplateNeedsHash(_config["template"]))
         builder.AppendLine("校验码：未使用");
     else if (GetBool(item, "IsPending"))
         builder.AppendLine("校验码：" + _config["checksumAlgorithm"] + "（计算中）");
@@ -1768,7 +1797,8 @@ private static void UpdateStatus()
     int ready;
     int errors;
     int pending;
-    CountRows(out ready, out errors, out pending);
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
 
     bool realTime = GetConfigBool(_config, "realTimePreview", true);
     _previewButton.IsEnabled = (!realTime && !_scanning);
@@ -1805,20 +1835,19 @@ private static void UpdateStatus()
 
     string text = "共 " + _files.Count + " 个文件" + DescribeSkipped();
     text += "；就绪 " + ready + "；异常 " + errors;
-    int skipped = CountSkippedRows();
     if (skipped > 0)
         text += "；过滤/日期跳过 " + skipped;
     if (pending > 0)
         text += "；校验码计算中 " + pending;
-    if (TemplateContainsToken(_config["template"], "【校验码】") && _hashTotal > 0 &&
-        _hashDone < _hashTotal)
+    bool needsHash = TemplateNeedsHash(_config["template"]);
+    if (needsHash && _hashTotal > 0 && _hashDone < _hashTotal)
         text += "（" + _hashDone + "/" + _hashTotal + "）";
     _statusText.Text = text;
 
     SetApplyEnabled(!_scanning && pending == 0 && ready > 0);
     if (_executeButton != null)
         _executeButton.IsEnabled = (!_scanning && pending == 0 && ready > 0 && !_executing);
-    if (pending > 0 && TemplateContainsToken(_config["template"], "【校验码】"))
+    if (pending > 0 && needsHash)
     {
         _progress.Visibility = Visibility.Visible;
         if (_hashTotal > 0)
@@ -1912,36 +1941,37 @@ private static int CountPendingRows()
     int ready;
     int errors;
     int pending;
-    CountRows(out ready, out errors, out pending);
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
     return pending;
-}
-
-private static int CountSkippedRows()
-{
-    int count = 0;
-    for (int i = 0; i < _files.Count; i++)
-    {
-        if (GetBool(_files[i], "IsSkipped"))
-            count++;
-    }
-    return count;
 }
 
 private static void CountRows(out int ready, out int errors, out int pending)
 {
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
+}
+
+private static void CountRows(out int ready, out int errors, out int pending, out int skipped)
+{
     ready = 0;
     errors = 0;
     pending = 0;
+    skipped = 0;
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
+        if (GetBool(item, "IsSkipped"))
+            skipped++;
         if (GetBool(item, "HasError"))
             errors++;
         else if (GetBool(item, "IsPending"))
             pending++;
         else
         {
-            string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
+            object targetValue;
+            string target = item.TryGetValue("TargetPath", out targetValue)
+                ? targetValue as string : null;
             if (target != null && target.Length > 0)
                 ready++;
         }
@@ -2942,6 +2972,17 @@ private static void Execute_Click(object sender, RoutedEventArgs e)
     EnsureDefaultPreset();
 
     int parallel = NormalizeParallelCount(GetConfigInt(_config, "execParallel", 2));
+    _execUiDirty = false;
+    lock (_execDirLock)
+    {
+        _execDirs.Clear();
+    }
+    _execAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
+    _execDigits = GetConfigInt(_config, "checksumDigits", 8);
+    _execPrefix = _config["checksumPrefix"] == null ? "" : _config["checksumPrefix"];
+    _execSuffix = _config["checksumSuffix"] == null ? "" : _config["checksumSuffix"];
+    _execVerifyEnabled = GetConfigBool(_config, "execVerify", true);
+    _execTemplateNeedsHash = TemplateNeedsHash(_config["template"]);
     _execQueue = queue;
     _execTotal = queue.Count;
     _execCursor = 0;
@@ -3009,8 +3050,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         string targetDirectory = Path.GetDirectoryName(target);
         if (targetDirectory == null || targetDirectory.Length == 0)
             throw new IOException("目标路径缺少目录");
-        if (!Directory.Exists(targetDirectory))
-            Directory.CreateDirectory(targetDirectory);
+        EnsureExecutionDirectory(targetDirectory);
 
         if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
         {
@@ -3025,15 +3065,17 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         if (File.Exists(target))
             throw new IOException("目标文件已存在");
 
-        bool verify = GetConfigBool(_config, "execVerify", true);
+        bool verify = _execVerifyEnabled;
+        bool crossVolume = (action == "移动") && !IsSameVolumePath(source, target);
+        bool verifyContent = verify && (action == "复制" || crossVolume);
         string verificationSourceHash = null;
-        if (verify && (action == "复制" || action == "移动"))
+        if (verifyContent)
         {
             verificationSourceHash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
             if (verificationSourceHash == null || verificationSourceHash.Length == 0)
             {
                 string hashError;
-                verificationSourceHash = ComputeHashHex(source, _config["checksumAlgorithm"], out hashError);
+                verificationSourceHash = ComputeHashHex(source, _execAlgorithm, out hashError);
                 if (hashError != null)
                     throw new IOException("执行后校验准备失败：无法计算源文件校验码（" + hashError + "）");
             }
@@ -3064,7 +3106,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         }
         else if (action == "移动")
         {
-            bool crossVolume = !IsSameVolumePath(source, target);
             if (crossVolume)
             {
                 string copyError;
@@ -3072,7 +3113,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
                     throw new IOException(copyError);
                 try
                 {
-                    if (verify)
+                    if (verifyContent)
                         VerifyExecutedFile(target, verificationSourceHash);
                 }
                 catch
@@ -3096,8 +3137,9 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
                 string moveError;
                 if (!MoveFileWithRetry(source, target, 3, out moveError))
                     throw new IOException(moveError);
+                // 同卷移动只是目录项改名，文件内容未变化，无需重新读取内容计算校验码。
                 if (verify)
-                    VerifyExecutedFile(target, verificationSourceHash);
+                    VerifyMovedFileName(item, target);
             }
         }
         else if (action == "重命名")
@@ -3112,8 +3154,9 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         }
 
         Interlocked.Increment(ref _execDone);
-        ReportExecutionRow(item, true, action + "完成" +
-            (verify && (action == "复制" || action == "移动") ? "，校验通过" : ""), "已完成");
+        string verifyText = verifyContent ? "，校验通过"
+            : (verify && _execTemplateNeedsHash && action == "移动" ? "，文件名校验通过" : "");
+        ReportExecutionRow(item, true, action + "完成" + verifyText, "已完成");
     }
     catch (Exception ex)
     {
@@ -3125,21 +3168,53 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
 private static void VerifyExecutedFile(string target, string expectedHash)
 {
     string error;
-    string targetHash = ComputeHashHex(target, _config["checksumAlgorithm"], out error);
+    string targetHash = ComputeHashHex(target, _execAlgorithm, out error);
     if (error != null)
         throw new IOException("执行后校验失败：无法计算目标文件校验码（" + error + "）");
     if (!string.Equals(expectedHash, targetHash, StringComparison.OrdinalIgnoreCase))
         throw new IOException("执行后校验失败：目标文件校验码与源文件不一致");
 
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!_execTemplateNeedsHash)
         return;
 
-    string badge = BuildChecksumBadge(_config["checksumAlgorithm"],
-        GetConfigInt(_config, "checksumDigits", 8),
-        _config["checksumPrefix"], _config["checksumSuffix"], expectedHash);
+    string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
+        _execPrefix, _execSuffix, expectedHash);
     string fileName = Path.GetFileName(target);
     if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
         throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+// 同卷移动：内容未改变，仅校验目标文件名中的校验码。
+private static void VerifyMovedFileName(Dictionary<string, object> item, string target)
+{
+    if (!_execTemplateNeedsHash)
+        return;
+    string expectedHash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
+    if (expectedHash == null || expectedHash.Length == 0)
+        return;
+
+    string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
+        _execPrefix, _execSuffix, expectedHash);
+    string fileName = Path.GetFileName(target);
+    if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
+        throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+private static void EnsureExecutionDirectory(string directory)
+{
+    lock (_execDirLock)
+    {
+        if (_execDirs.Contains(directory))
+            return;
+    }
+
+    if (!Directory.Exists(directory))
+        Directory.CreateDirectory(directory);
+
+    lock (_execDirLock)
+    {
+        _execDirs.Add(directory);
+    }
 }
 
 private static void TryDeleteTargetFile(string path)
@@ -3189,9 +3264,7 @@ private static void ReportExecutionRow(Dictionary<string, object> item, bool suc
                     item["Error"] = message == null ? "执行失败" : message;
                 }
                 RefreshRowDetails(item);
-                if (_grid != null)
-                    _grid.Items.Refresh();
-                UpdateExecutionStatus();
+                _execUiDirty = true;
             }
         }));
     }
@@ -3221,7 +3294,18 @@ private static void StopExecutionTimer()
 
 private static void ExecutionTimer_Tick(object sender, EventArgs e)
 {
+    FlushExecutionUi();
     UpdateExecutionStatus();
+}
+
+// 把执行期间累计的行状态变更合并为一次全量刷新。
+private static void FlushExecutionUi()
+{
+    if (!_execUiDirty)
+        return;
+    _execUiDirty = false;
+    if (_grid != null)
+        _grid.Items.Refresh();
 }
 
 private static void UpdateExecutionStatus()
@@ -3268,6 +3352,7 @@ private static void PostExecutionCompleted()
             _executing = false;
             _execStop = false;
             StopExecutionTimer();
+            FlushExecutionUi();
             UpdateExecutionStatus();
 
             bool shouldClose = _closeAfterExecution;

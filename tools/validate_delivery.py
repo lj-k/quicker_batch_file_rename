@@ -75,7 +75,7 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.6", "deployed code version is 0.06.6")
+check(dist_text.splitlines()[1] == "// 版本：0.06.7", "deployed code version is 0.06.7")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
@@ -98,9 +98,14 @@ check("CopyFileAdaptive" in dist_text, "deployed code contains adaptive transfer
 check("DeliveryMode" in dist_text, "deployed code contains delivery mode")
 check("Finish_Click" in dist_text, "deployed code contains finish handler")
 check('"actions"' in dist_text, "deployed code outputs action list")
+check("FlushExecutionUi" in dist_text, "deployed code batches execution row refresh")
+check("VerifyMovedFileName" in dist_text, "deployed code skips content hash for same-volume move")
+check("EnsureExecutionDirectory" in dist_text, "deployed code caches execution directories")
+check("TemplateNeedsHash" in dist_text, "deployed code caches template checksum detection")
+check("BitmapCacheOption.None" in dist_text, "deployed code reads EXIF metadata only")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.6" in core_text, "core source version is 0.06.6")
+check("// 版本：0.06.7" in core_text, "core source version is 0.06.7")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("preferExifOnFilenameConflict" in core_text, "core contains exif conflict config")
 check("BuildFlatPresetDictionary" in core_text, "core contains flat preset builder")
@@ -114,8 +119,8 @@ check("ShouldSkipByFilter" in core_text, "core contains filter decision")
 check("ResolveAction" in core_text, "core contains action resolution")
 check("CopyFileWithRetry" in core_text, "core contains copy retry engine")
 check("SelectCopyBufferSizeForDrive" in core_text, "core contains drive buffer profile")
-check('// 版本：0.06.6' in aux_text, "aux source version is 0.06.6")
-check("XAML 版本：0.06.6" in xaml_text, "XAML version is 0.06.6")
+check('// 版本：0.06.7' in aux_text, "aux source version is 0.06.7")
+check("XAML 版本：0.06.7" in xaml_text, "XAML version is 0.06.7")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -138,18 +143,19 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.14" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.14")
+check("> 版本：0.0.15" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.15")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
 check("预设变量未持久化排查" in req_text, "requirements includes preset persistence")
 check("预设变量直接赋值" in req_text, "requirements includes direct preset assignment")
 check("winContext.Context.SetVarValue" in req_text, "requirements includes direct SetVarValue")
+check("交互窗口与执行性能优化" in req_text, "requirements includes performance optimization")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.6"),
-    ("doc/测试报告.md", "0.06.6"),
+    ("doc/开发说明.md", "0.06.7"),
+    ("doc/测试报告.md", "0.06.7"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -161,9 +167,13 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.6]" in changelog_text, "CHANGELOG has 0.06.6 entry")
+    check("[0.06.7]" in changelog_text, "CHANGELOG has 0.06.7 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
+
+test_report_text = (ROOT / "doc" / "测试报告.md").read_text(encoding="utf-8")
+check("六团队性能会诊记录" in test_report_text, "test report has six-team performance review")
+check("344 项通过" in test_report_text, "test report records 344 passing tests")
 
 agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 check("版本：0.02" in agents, "AGENTS.md has version 0.02")
@@ -180,8 +190,8 @@ s2 = release / "方案2-执行不输出列表"
 for folder in [s1, s2]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.6",
-          str(folder.name) + " Aux version 0.06.6")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.7",
+          str(folder.name) + " Aux version 0.06.7")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

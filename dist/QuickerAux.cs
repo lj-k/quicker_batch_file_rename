@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.6
+// 版本：0.06.7
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -30,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.6
+// 版本：0.06.7
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -75,6 +75,28 @@ private const uint Blake3ChunkStart = 1U;
 private const uint Blake3ChunkEnd = 2U;
 private const uint Blake3Parent = 4U;
 private const uint Blake3Root = 8U;
+
+// BLAKE3 压缩使用线程内复用的临时缓冲区，避免每个 64 字节块分配数组。
+[ThreadStatic] private static uint[] _blake3State;
+[ThreadStatic] private static uint[] _blake3Message;
+[ThreadStatic] private static uint[] _blake3Permuted;
+[ThreadStatic] private static uint[] _blake3Block;
+[ThreadStatic] private static uint[] _blake3LastBlock;
+[ThreadStatic] private static uint[] _blake3Cv;
+[ThreadStatic] private static uint[] _blake3Output;
+
+private static void EnsureBlake3Scratch()
+{
+    if (_blake3State != null)
+        return;
+    _blake3State = new uint[16];
+    _blake3Message = new uint[16];
+    _blake3Permuted = new uint[16];
+    _blake3Block = new uint[16];
+    _blake3LastBlock = new uint[16];
+    _blake3Cv = new uint[8];
+    _blake3Output = new uint[16];
+}
 
 private static uint[] _crc32Table = null;
 private static readonly object _crc32TableLock = new object();
@@ -203,76 +225,108 @@ public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
     out DateTime? effectiveDate, out string effectiveSource,
     out string missingText, out bool skipped)
 {
+    if (dates == null)
+    {
+        effectiveDate = null;
+        effectiveSource = "empty";
+        missingText = "";
+        skipped = false;
+        return;
+    }
+
+    DateTime? filenameDate;
+    DateTime? exifDate;
+    DateTime? modifiedDate;
+    DateTime? createdDate;
+    dates.TryGetValue("filename", out filenameDate);
+    dates.TryGetValue("exif", out exifDate);
+    dates.TryGetValue("modified", out modifiedDate);
+    dates.TryGetValue("created", out createdDate);
+
+    ResolveDateValue(filenameDate, exifDate, modifiedDate, createdDate,
+        primarySource, fallbackOrder, customText, preferExifOnFilenameConflict,
+        out effectiveDate, out effectiveSource, out missingText, out skipped);
+}
+
+// 四值重载：批量刷新日期时避免为每一行分配 Dictionary。
+public static void ResolveDateValue(DateTime? filenameDate, DateTime? exifDate,
+    DateTime? modifiedDate, DateTime? createdDate,
+    string primarySource, string fallbackOrder, string customText,
+    bool preferExifOnFilenameConflict,
+    out DateTime? effectiveDate, out string effectiveSource,
+    out string missingText, out bool skipped)
+{
     effectiveDate = null;
     effectiveSource = "";
     missingText = "";
     skipped = false;
 
-    if (dates != null)
-    {
-        string primary = NormalizeDateSource(primarySource);
-        DateTime? filenameDate = null;
-        DateTime? exifDate = null;
-        bool hasFilenameExifConflict = false;
-        if (preferExifOnFilenameConflict &&
-            dates.TryGetValue("filename", out filenameDate) && filenameDate.HasValue &&
-            dates.TryGetValue("exif", out exifDate) && exifDate.HasValue &&
-            filenameDate.Value.Date != exifDate.Value.Date)
-        {
-            hasFilenameExifConflict = true;
-        }
+    string primary = NormalizeDateSource(primarySource);
+    bool hasFilenameExifConflict = preferExifOnFilenameConflict &&
+        filenameDate.HasValue && exifDate.HasValue &&
+        filenameDate.Value.Date != exifDate.Value.Date;
 
-        DateTime? value;
-        if (dates.TryGetValue(primary, out value) && value.HasValue)
+    DateTime? value = GetDateBySource(primary, filenameDate, exifDate, modifiedDate, createdDate);
+    if (value.HasValue)
+    {
+        if (primary == "filename" && hasFilenameExifConflict)
         {
-            if (primary == "filename" && hasFilenameExifConflict)
+            effectiveDate = exifDate;
+            effectiveSource = "exif";
+            return;
+        }
+        effectiveDate = value;
+        effectiveSource = primary;
+        return;
+    }
+
+    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+    for (int i = 0; i < order.Length; i++)
+    {
+        string token = order[i];
+        if (token == "empty")
+        {
+            effectiveSource = "empty";
+            return;
+        }
+        if (token == "custom")
+        {
+            effectiveSource = "custom";
+            missingText = customText == null ? "" : customText;
+            return;
+        }
+        if (token == "skip")
+        {
+            effectiveSource = "skip";
+            skipped = true;
+            return;
+        }
+        value = GetDateBySource(token, filenameDate, exifDate, modifiedDate, createdDate);
+        if (value.HasValue)
+        {
+            if (token == "filename" && hasFilenameExifConflict)
             {
                 effectiveDate = exifDate;
                 effectiveSource = "exif";
                 return;
             }
             effectiveDate = value;
-            effectiveSource = primary;
+            effectiveSource = token;
             return;
-        }
-
-        string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
-        for (int i = 0; i < order.Length; i++)
-        {
-            string token = order[i];
-            if (token == "empty")
-            {
-                effectiveSource = "empty";
-                return;
-            }
-            if (token == "custom")
-            {
-                effectiveSource = "custom";
-                missingText = customText == null ? "" : customText;
-                return;
-            }
-            if (token == "skip")
-            {
-                effectiveSource = "skip";
-                skipped = true;
-                return;
-            }
-            if (dates.TryGetValue(token, out value) && value.HasValue)
-            {
-                if (token == "filename" && hasFilenameExifConflict)
-                {
-                    effectiveDate = exifDate;
-                    effectiveSource = "exif";
-                    return;
-                }
-                effectiveDate = value;
-                effectiveSource = token;
-                return;
-            }
         }
     }
 
     effectiveSource = "empty";
+}
+
+private static DateTime? GetDateBySource(string source, DateTime? filenameDate,
+    DateTime? exifDate, DateTime? modifiedDate, DateTime? createdDate)
+{
+    if (source == "filename") return filenameDate;
+    if (source == "exif") return exifDate;
+    if (source == "modified") return modifiedDate;
+    if (source == "created") return createdDate;
+    return null;
 }
 
 public static string NormalizeExtensionList(string value)
@@ -1259,6 +1313,7 @@ private static string ToHex(byte[] data)
 
 private static string ComputeBlake3Hex(Stream stream)
 {
+    EnsureBlake3Scratch();
     byte[] chunk = new byte[1024];
     int chunkLength = 0;
     ulong chunkCounter = 0;
@@ -1287,15 +1342,17 @@ private static string ComputeBlake3Hex(Stream stream)
     }
 
     uint[] inputCv;
-    uint[] blockWords;
-    uint blockLength;
-    uint flags;
-    Blake3ChunkOutput(chunk, chunkLength, chunkCounter, out inputCv, out blockWords, out blockLength, out flags);
+    uint[] lastBlock;
+    uint lastBlockLength;
+    uint lastFlags;
+    Blake3ChunkOutput(chunk, chunkLength, chunkCounter, out inputCv, out lastBlock,
+        out lastBlockLength, out lastFlags);
 
+    uint[] compressed = _blake3Output;
     ulong outputCounter = chunkCounter;
     while (stack.Count > 0)
     {
-        uint[] compressed = Blake3Compress(inputCv, blockWords, outputCounter, blockLength, flags);
+        Blake3Compress(inputCv, lastBlock, outputCounter, lastBlockLength, lastFlags, compressed);
         uint[] rightCv = new uint[8];
         Array.Copy(compressed, rightCv, 8);
 
@@ -1306,18 +1363,18 @@ private static string ComputeBlake3Hex(Stream stream)
         Array.Copy(leftCv, 0, parentBlock, 0, 8);
         Array.Copy(rightCv, 0, parentBlock, 8, 8);
 
-        inputCv = (uint[])Blake3Iv.Clone();
-        blockWords = parentBlock;
-        blockLength = 64;
-        flags = Blake3Parent;
+        inputCv = Blake3Iv;
+        lastBlock = parentBlock;
+        lastBlockLength = 64;
+        lastFlags = Blake3Parent;
         outputCounter = 0;
     }
 
-    uint[] root = Blake3Compress(inputCv, blockWords, 0, blockLength, flags | Blake3Root);
+    Blake3Compress(inputCv, lastBlock, 0, lastBlockLength, lastFlags | Blake3Root, compressed);
     byte[] output = new byte[32];
     for (int i = 0; i < 8; i++)
     {
-        uint word = root[i];
+        uint word = compressed[i];
         output[i * 4] = (byte)(word & 0xFFU);
         output[i * 4 + 1] = (byte)((word >> 8) & 0xFFU);
         output[i * 4 + 2] = (byte)((word >> 16) & 0xFFU);
@@ -1328,52 +1385,68 @@ private static string ComputeBlake3Hex(Stream stream)
 
 private static uint[] Blake3ChunkCv(byte[] chunk, int length, ulong chunkCounter)
 {
-    uint[] inputCv;
-    uint[] blockWords;
-    uint blockLength;
-    uint flags;
-    Blake3ChunkOutput(chunk, length, chunkCounter, out inputCv, out blockWords, out blockLength, out flags);
-    uint[] compressed = Blake3Compress(inputCv, blockWords, chunkCounter, blockLength, flags);
-    uint[] cv = new uint[8];
-    Array.Copy(compressed, cv, 8);
-    return cv;
+    uint[] cv;
+    uint[] lastBlock;
+    uint lastBlockLength;
+    uint lastFlags;
+    Blake3ChunkOutput(chunk, length, chunkCounter, out cv, out lastBlock,
+        out lastBlockLength, out lastFlags);
+
+    uint[] compressed = _blake3Output;
+    Blake3Compress(cv, lastBlock, chunkCounter, lastBlockLength, lastFlags, compressed);
+
+    uint[] result = new uint[8];
+    Array.Copy(compressed, result, 8);
+    return result;
 }
 
 private static void Blake3ChunkOutput(byte[] chunk, int length, ulong chunkCounter,
-    out uint[] inputCv, out uint[] blockWords, out uint blockLength, out uint flags)
+    out uint[] inputCv, out uint[] lastBlock, out uint lastBlockLength, out uint lastFlags)
 {
-    uint[] cv = (uint[])Blake3Iv.Clone();
+    EnsureBlake3Scratch();
+    uint[] cv = _blake3Cv;
+    for (int i = 0; i < 8; i++)
+        cv[i] = Blake3Iv[i];
+
+    uint[] block = _blake3Block;
+    uint[] compressed = _blake3Output;
+    int blockCount = length <= 0 ? 1 : (length + 63) / 64;
     int offset = 0;
-    while (true)
+
+    for (int blockIndex = 0; blockIndex < blockCount; blockIndex++)
     {
         int remaining = length - offset;
         if (remaining > 64) remaining = 64;
         if (remaining < 0) remaining = 0;
 
-        uint[] block = new uint[16];
+        for (int i = 0; i < 16; i++)
+            block[i] = 0;
         for (int i = 0; i < remaining; i++)
-        {
             block[i / 4] |= (uint)chunk[offset + i] << ((i % 4) * 8);
-        }
 
         uint blockFlags = (offset == 0 ? Blake3ChunkStart : 0U);
-        bool isLast = (offset + remaining >= length);
+        bool isLast = (blockIndex == blockCount - 1);
         if (isLast)
         {
             blockFlags |= Blake3ChunkEnd;
+            Array.Copy(block, _blake3LastBlock, 16);
             inputCv = cv;
-            blockWords = block;
-            blockLength = (uint)remaining;
-            flags = blockFlags;
+            lastBlock = _blake3LastBlock;
+            lastBlockLength = (uint)remaining;
+            lastFlags = blockFlags;
             return;
         }
 
-        uint[] compressed = Blake3Compress(cv, block, chunkCounter, (uint)remaining, blockFlags);
-        uint[] nextCv = new uint[8];
-        Array.Copy(compressed, nextCv, 8);
-        cv = nextCv;
+        Blake3Compress(cv, block, chunkCounter, (uint)remaining, blockFlags, compressed);
+        for (int i = 0; i < 8; i++)
+            cv[i] = compressed[i];
         offset += remaining;
     }
+
+    inputCv = cv;
+    lastBlock = _blake3LastBlock;
+    lastBlockLength = 0;
+    lastFlags = Blake3ChunkStart | Blake3ChunkEnd;
 }
 
 private static void Blake3AddChunkCv(List<uint[]> stack, uint[] cv, ulong totalChunks)
@@ -1382,26 +1455,36 @@ private static void Blake3AddChunkCv(List<uint[]> stack, uint[] cv, ulong totalC
     {
         uint[] left = stack[stack.Count - 1];
         stack.RemoveAt(stack.Count - 1);
-        cv = Blake3ParentCv(left, cv);
+        Blake3ParentCv(left, cv, left);
+        cv = left;
         totalChunks >>= 1;
     }
     stack.Add(cv);
 }
 
-private static uint[] Blake3ParentCv(uint[] left, uint[] right)
+private static void Blake3ParentCv(uint[] left, uint[] right, uint[] destination)
 {
-    uint[] block = new uint[16];
-    Array.Copy(left, 0, block, 0, 8);
-    Array.Copy(right, 0, block, 8, 8);
-    uint[] compressed = Blake3Compress(Blake3Iv, block, 0, 64, Blake3Parent);
-    uint[] cv = new uint[8];
-    Array.Copy(compressed, cv, 8);
-    return cv;
+    EnsureBlake3Scratch();
+    uint[] block = _blake3Block;
+    for (int i = 0; i < 8; i++)
+    {
+        block[i] = left[i];
+        block[i + 8] = right[i];
+    }
+
+    Blake3Compress(Blake3Iv, block, 0, 64, Blake3Parent, _blake3Output);
+    for (int i = 0; i < 8; i++)
+        destination[i] = _blake3Output[i];
 }
 
-private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uint blockLength, uint flags)
+private static void Blake3Compress(uint[] cv, uint[] block, ulong counter,
+    uint blockLength, uint flags, uint[] output)
 {
-    uint[] state = new uint[16];
+    EnsureBlake3Scratch();
+    uint[] state = _blake3State;
+    uint[] message = _blake3Message;
+    uint[] permuted = _blake3Permuted;
+
     for (int i = 0; i < 8; i++)
         state[i] = cv[i];
     state[8] = Blake3Iv[0];
@@ -1413,7 +1496,6 @@ private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uin
     state[14] = blockLength;
     state[15] = flags;
 
-    uint[] message = new uint[16];
     Array.Copy(block, message, 16);
 
     for (int round = 0; round < 7; round++)
@@ -1429,20 +1511,17 @@ private static uint[] Blake3Compress(uint[] cv, uint[] block, ulong counter, uin
 
         if (round != 6)
         {
-            uint[] permuted = new uint[16];
             for (int i = 0; i < 16; i++)
                 permuted[i] = message[Blake3Permutation[i]];
-            message = permuted;
+            Array.Copy(permuted, message, 16);
         }
     }
 
-    uint[] output = new uint[16];
     for (int i = 0; i < 8; i++)
     {
         output[i] = state[i] ^ state[i + 8];
         output[i + 8] = state[i + 8] ^ cv[i];
     }
-    return output;
 }
 
 private static void Blake3G(uint[] state, int a, int b, int c, int d, uint mx, uint my)
@@ -2496,7 +2575,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.6
+// 版本：0.06.7
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2562,6 +2641,10 @@ private static Dictionary<string, string> _hashCache = new Dictionary<string, st
 private static readonly object _hashLock = new object();
 private static readonly Regex EditorTokenRegex = new Regex("【[^】]*】", RegexOptions.Compiled);
 
+// 模板是否包含【校验码】的结果缓存：模板不变时避免每行重复执行正则。
+private static string _templateHashCheckKey = null;
+private static bool _templateHashCheckValue = false;
+
 private static DispatcherTimer _debounceTimer;
 private static TextPointer _lastCaret;
 private static bool _suppressEvents = false;
@@ -2592,6 +2675,16 @@ private static long _execStartTicks = 0;
 private static List<Dictionary<string, object>> _execQueue = new List<Dictionary<string, object>>();
 private static DispatcherTimer _execTimer = null;
 private static readonly object _execRowLock = new object();
+// 执行期间的界面刷新合并到定时器，避免每个文件一次全量 Items.Refresh。
+private static bool _execUiDirty = false;
+private static readonly object _execDirLock = new object();
+private static readonly HashSet<string> _execDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+private static string _execAlgorithm = "CRC32";
+private static int _execDigits = 8;
+private static string _execPrefix = "";
+private static string _execSuffix = "";
+private static bool _execVerifyEnabled = true;
+private static bool _execTemplateNeedsHash = false;
 
 private static readonly string[] ExifExtensions = new string[] {
     ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp", ".gif", ".heic", ".heif", ".webp"
@@ -3278,7 +3371,7 @@ private static void ApplyUiConfig()
     string oldRealTime = GetConfigString(_config, "realTimePreview", "true");
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
-    bool oldNeedsHash = TemplateContainsToken(GetConfigString(_config, "template", DefaultTemplate), "【校验码】");
+    bool oldNeedsHash = TemplateNeedsHash(GetConfigString(_config, "template", DefaultTemplate));
 
     ReadConfigFromUi();
 
@@ -3307,7 +3400,7 @@ private static void ApplyUiConfig()
     if (_scanning)
         return;
 
-    bool newNeedsHash = TemplateContainsToken(_config["template"], "【校验码】");
+    bool newNeedsHash = TemplateNeedsHash(_config["template"]);
     if (oldNeedsHash && !newNeedsHash)
     {
         _hashGeneration++;
@@ -3409,17 +3502,13 @@ private static void RefreshEffectiveDates(bool recomputeTarget)
 
 private static void UpdateEffectiveDate(Dictionary<string, object> item)
 {
-    Dictionary<string, DateTime?> dates = new Dictionary<string, DateTime?>(StringComparer.OrdinalIgnoreCase);
-    dates["filename"] = GetDate(item, "FileNameDate");
-    dates["exif"] = GetDate(item, "ExifDate");
-    dates["modified"] = GetDate(item, "Modified");
-    dates["created"] = GetDate(item, "Created");
-
     DateTime? effectiveDate;
     string effectiveSource;
     string missingText;
     bool skipped;
-    ResolveDateValue(dates, _config["dateSource"], _config["dateFallbackOrder"],
+    ResolveDateValue(GetDate(item, "FileNameDate"), GetDate(item, "ExifDate"),
+        GetDate(item, "Modified"), GetDate(item, "Created"),
+        _config["dateSource"], _config["dateFallbackOrder"],
         _config["dateFallbackCustomText"],
         GetConfigBool(_config, "preferExifOnFilenameConflict", false),
         out effectiveDate, out effectiveSource, out missingText, out skipped);
@@ -3687,8 +3776,9 @@ private static DateTime? TryReadExifDate(string path)
     {
         using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
         {
+            // 仅读取元数据，不解码像素；大图片扫描时可显著降低内存与 CPU 开销。
             BitmapDecoder decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile,
-                BitmapCacheOption.OnLoad);
+                BitmapCacheOption.None);
             if (decoder.Frames.Count == 0)
                 return null;
             BitmapMetadata metadata = decoder.Frames[0].Metadata as BitmapMetadata;
@@ -3775,7 +3865,7 @@ private static void EnsureHashWorker()
     if (_scanning || _files.Count == 0 || _window == null)
         return;
 
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!TemplateNeedsHash(_config["template"]))
     {
         _hashTotal = 0;
         _hashDone = 0;
@@ -3788,13 +3878,16 @@ private static void EnsureHashWorker()
         return;
 
     List<string> missing = new List<string>();
-    for (int i = 0; i < _files.Count; i++)
+    lock (_hashLock)
     {
-        if (GetBool(_files[i], "IsSkipped"))
-            continue;
-        string path = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
-        if (!IsHashCached(path, algorithm))
-            missing.Add(path);
+        for (int i = 0; i < _files.Count; i++)
+        {
+            if (GetBool(_files[i], "IsSkipped"))
+                continue;
+            string path = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
+            if (!_hashCache.ContainsKey(HashKey(path, algorithm)))
+                missing.Add(path);
+        }
     }
 
     if (missing.Count == 0)
@@ -3862,6 +3955,7 @@ private static void HashWorker(int generation, string algorithm, List<string> pa
 {
     try
     {
+        long lastPostTicks = 0;
         for (int i = 0; i < paths.Count; i++)
         {
             if (_hashStop || generation != _hashGeneration)
@@ -3878,8 +3972,11 @@ private static void HashWorker(int generation, string algorithm, List<string> pa
                 return;
 
             _hashDone++;
-            if (_hashDone % 5 == 0 || _hashDone >= _hashTotal)
+            long nowTicks = DateTime.UtcNow.Ticks;
+            if (_hashDone >= _hashTotal ||
+                nowTicks - lastPostTicks >= TimeSpan.TicksPerMillisecond * 120)
             {
+                lastPostTicks = nowTicks;
                 Post(dispatcher, delegate()
                 {
                     if (generation == _hashGeneration)
@@ -3934,7 +4031,7 @@ private static void RecomputeAll()
     string template = _config["template"];
     string badToken;
     bool templateValid = ValidateTemplateTokens(template, out badToken);
-    bool needsHash = TemplateContainsToken(template, "【校验码】");
+    bool needsHash = TemplateNeedsHash(template);
 
     string algorithm = _config["checksumAlgorithm"];
     int digits = GetConfigInt(_config, "checksumDigits", 8);
@@ -4157,6 +4254,17 @@ private static void RefreshRowDetails(Dictionary<string, object> item)
     item["Details"] = BuildDetails(item);
 }
 
+private static bool TemplateNeedsHash(string template)
+{
+    if (template == null)
+        template = "";
+    if (_templateHashCheckKey == template)
+        return _templateHashCheckValue;
+    _templateHashCheckValue = TemplateContainsToken(template, "【校验码】");
+    _templateHashCheckKey = template;
+    return _templateHashCheckValue;
+}
+
 private static void SetRowError(Dictionary<string, object> item, string message, string status)
 {
     item["HasError"] = true;
@@ -4194,7 +4302,7 @@ private static string BuildDetails(Dictionary<string, object> item)
     builder.AppendLine("扩展名：" + Convert.ToString(item["Ext"], CultureInfo.InvariantCulture));
 
     string hash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!TemplateNeedsHash(_config["template"]))
         builder.AppendLine("校验码：未使用");
     else if (GetBool(item, "IsPending"))
         builder.AppendLine("校验码：" + _config["checksumAlgorithm"] + "（计算中）");
@@ -4238,7 +4346,8 @@ private static void UpdateStatus()
     int ready;
     int errors;
     int pending;
-    CountRows(out ready, out errors, out pending);
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
 
     bool realTime = GetConfigBool(_config, "realTimePreview", true);
     _previewButton.IsEnabled = (!realTime && !_scanning);
@@ -4275,20 +4384,19 @@ private static void UpdateStatus()
 
     string text = "共 " + _files.Count + " 个文件" + DescribeSkipped();
     text += "；就绪 " + ready + "；异常 " + errors;
-    int skipped = CountSkippedRows();
     if (skipped > 0)
         text += "；过滤/日期跳过 " + skipped;
     if (pending > 0)
         text += "；校验码计算中 " + pending;
-    if (TemplateContainsToken(_config["template"], "【校验码】") && _hashTotal > 0 &&
-        _hashDone < _hashTotal)
+    bool needsHash = TemplateNeedsHash(_config["template"]);
+    if (needsHash && _hashTotal > 0 && _hashDone < _hashTotal)
         text += "（" + _hashDone + "/" + _hashTotal + "）";
     _statusText.Text = text;
 
     SetApplyEnabled(!_scanning && pending == 0 && ready > 0);
     if (_executeButton != null)
         _executeButton.IsEnabled = (!_scanning && pending == 0 && ready > 0 && !_executing);
-    if (pending > 0 && TemplateContainsToken(_config["template"], "【校验码】"))
+    if (pending > 0 && needsHash)
     {
         _progress.Visibility = Visibility.Visible;
         if (_hashTotal > 0)
@@ -4382,36 +4490,37 @@ private static int CountPendingRows()
     int ready;
     int errors;
     int pending;
-    CountRows(out ready, out errors, out pending);
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
     return pending;
-}
-
-private static int CountSkippedRows()
-{
-    int count = 0;
-    for (int i = 0; i < _files.Count; i++)
-    {
-        if (GetBool(_files[i], "IsSkipped"))
-            count++;
-    }
-    return count;
 }
 
 private static void CountRows(out int ready, out int errors, out int pending)
 {
+    int skipped;
+    CountRows(out ready, out errors, out pending, out skipped);
+}
+
+private static void CountRows(out int ready, out int errors, out int pending, out int skipped)
+{
     ready = 0;
     errors = 0;
     pending = 0;
+    skipped = 0;
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
+        if (GetBool(item, "IsSkipped"))
+            skipped++;
         if (GetBool(item, "HasError"))
             errors++;
         else if (GetBool(item, "IsPending"))
             pending++;
         else
         {
-            string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
+            object targetValue;
+            string target = item.TryGetValue("TargetPath", out targetValue)
+                ? targetValue as string : null;
             if (target != null && target.Length > 0)
                 ready++;
         }
@@ -5412,6 +5521,17 @@ private static void Execute_Click(object sender, RoutedEventArgs e)
     EnsureDefaultPreset();
 
     int parallel = NormalizeParallelCount(GetConfigInt(_config, "execParallel", 2));
+    _execUiDirty = false;
+    lock (_execDirLock)
+    {
+        _execDirs.Clear();
+    }
+    _execAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
+    _execDigits = GetConfigInt(_config, "checksumDigits", 8);
+    _execPrefix = _config["checksumPrefix"] == null ? "" : _config["checksumPrefix"];
+    _execSuffix = _config["checksumSuffix"] == null ? "" : _config["checksumSuffix"];
+    _execVerifyEnabled = GetConfigBool(_config, "execVerify", true);
+    _execTemplateNeedsHash = TemplateNeedsHash(_config["template"]);
     _execQueue = queue;
     _execTotal = queue.Count;
     _execCursor = 0;
@@ -5479,8 +5599,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         string targetDirectory = Path.GetDirectoryName(target);
         if (targetDirectory == null || targetDirectory.Length == 0)
             throw new IOException("目标路径缺少目录");
-        if (!Directory.Exists(targetDirectory))
-            Directory.CreateDirectory(targetDirectory);
+        EnsureExecutionDirectory(targetDirectory);
 
         if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
         {
@@ -5495,15 +5614,17 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         if (File.Exists(target))
             throw new IOException("目标文件已存在");
 
-        bool verify = GetConfigBool(_config, "execVerify", true);
+        bool verify = _execVerifyEnabled;
+        bool crossVolume = (action == "移动") && !IsSameVolumePath(source, target);
+        bool verifyContent = verify && (action == "复制" || crossVolume);
         string verificationSourceHash = null;
-        if (verify && (action == "复制" || action == "移动"))
+        if (verifyContent)
         {
             verificationSourceHash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
             if (verificationSourceHash == null || verificationSourceHash.Length == 0)
             {
                 string hashError;
-                verificationSourceHash = ComputeHashHex(source, _config["checksumAlgorithm"], out hashError);
+                verificationSourceHash = ComputeHashHex(source, _execAlgorithm, out hashError);
                 if (hashError != null)
                     throw new IOException("执行后校验准备失败：无法计算源文件校验码（" + hashError + "）");
             }
@@ -5534,7 +5655,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         }
         else if (action == "移动")
         {
-            bool crossVolume = !IsSameVolumePath(source, target);
             if (crossVolume)
             {
                 string copyError;
@@ -5542,7 +5662,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
                     throw new IOException(copyError);
                 try
                 {
-                    if (verify)
+                    if (verifyContent)
                         VerifyExecutedFile(target, verificationSourceHash);
                 }
                 catch
@@ -5566,8 +5686,9 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
                 string moveError;
                 if (!MoveFileWithRetry(source, target, 3, out moveError))
                     throw new IOException(moveError);
+                // 同卷移动只是目录项改名，文件内容未变化，无需重新读取内容计算校验码。
                 if (verify)
-                    VerifyExecutedFile(target, verificationSourceHash);
+                    VerifyMovedFileName(item, target);
             }
         }
         else if (action == "重命名")
@@ -5582,8 +5703,9 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         }
 
         Interlocked.Increment(ref _execDone);
-        ReportExecutionRow(item, true, action + "完成" +
-            (verify && (action == "复制" || action == "移动") ? "，校验通过" : ""), "已完成");
+        string verifyText = verifyContent ? "，校验通过"
+            : (verify && _execTemplateNeedsHash && action == "移动" ? "，文件名校验通过" : "");
+        ReportExecutionRow(item, true, action + "完成" + verifyText, "已完成");
     }
     catch (Exception ex)
     {
@@ -5595,21 +5717,53 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
 private static void VerifyExecutedFile(string target, string expectedHash)
 {
     string error;
-    string targetHash = ComputeHashHex(target, _config["checksumAlgorithm"], out error);
+    string targetHash = ComputeHashHex(target, _execAlgorithm, out error);
     if (error != null)
         throw new IOException("执行后校验失败：无法计算目标文件校验码（" + error + "）");
     if (!string.Equals(expectedHash, targetHash, StringComparison.OrdinalIgnoreCase))
         throw new IOException("执行后校验失败：目标文件校验码与源文件不一致");
 
-    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+    if (!_execTemplateNeedsHash)
         return;
 
-    string badge = BuildChecksumBadge(_config["checksumAlgorithm"],
-        GetConfigInt(_config, "checksumDigits", 8),
-        _config["checksumPrefix"], _config["checksumSuffix"], expectedHash);
+    string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
+        _execPrefix, _execSuffix, expectedHash);
     string fileName = Path.GetFileName(target);
     if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
         throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+// 同卷移动：内容未改变，仅校验目标文件名中的校验码。
+private static void VerifyMovedFileName(Dictionary<string, object> item, string target)
+{
+    if (!_execTemplateNeedsHash)
+        return;
+    string expectedHash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
+    if (expectedHash == null || expectedHash.Length == 0)
+        return;
+
+    string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
+        _execPrefix, _execSuffix, expectedHash);
+    string fileName = Path.GetFileName(target);
+    if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
+        throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+private static void EnsureExecutionDirectory(string directory)
+{
+    lock (_execDirLock)
+    {
+        if (_execDirs.Contains(directory))
+            return;
+    }
+
+    if (!Directory.Exists(directory))
+        Directory.CreateDirectory(directory);
+
+    lock (_execDirLock)
+    {
+        _execDirs.Add(directory);
+    }
 }
 
 private static void TryDeleteTargetFile(string path)
@@ -5659,9 +5813,7 @@ private static void ReportExecutionRow(Dictionary<string, object> item, bool suc
                     item["Error"] = message == null ? "执行失败" : message;
                 }
                 RefreshRowDetails(item);
-                if (_grid != null)
-                    _grid.Items.Refresh();
-                UpdateExecutionStatus();
+                _execUiDirty = true;
             }
         }));
     }
@@ -5691,7 +5843,18 @@ private static void StopExecutionTimer()
 
 private static void ExecutionTimer_Tick(object sender, EventArgs e)
 {
+    FlushExecutionUi();
     UpdateExecutionStatus();
+}
+
+// 把执行期间累计的行状态变更合并为一次全量刷新。
+private static void FlushExecutionUi()
+{
+    if (!_execUiDirty)
+        return;
+    _execUiDirty = false;
+    if (_grid != null)
+        _grid.Items.Refresh();
 }
 
 private static void UpdateExecutionStatus()
@@ -5738,6 +5901,7 @@ private static void PostExecutionCompleted()
             _executing = false;
             _execStop = false;
             StopExecutionTimer();
+            FlushExecutionUi();
             UpdateExecutionStatus();
 
             bool shouldClose = _closeAfterExecution;
