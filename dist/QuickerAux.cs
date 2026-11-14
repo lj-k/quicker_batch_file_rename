@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.13
+// 版本：0.06.14
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.13
+// 版本：0.06.14
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -2827,7 +2827,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.13
+// 版本：0.06.14
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2857,6 +2857,20 @@ private static TextBlock _perfText;
 private static TextBox _gridFilterText;
 private static ComboBox _gridStatusFilterCombo;
 private static TextBlock _gridFilterCountText;
+private static Popup _headerFilterPopup;
+private static TextBlock _headerFilterTitle;
+private static TextBox _headerFilterTextBox;
+private static Button _btnHeaderFilterApply;
+private static Button _btnHeaderFilterClear;
+private static string _activeHeaderFilterKey = "";
+private static Dictionary<string, string> _columnFilters =
+    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+private static Dictionary<string, TextBlock> _headerFilterGlyphs =
+    new Dictionary<string, TextBlock>(StringComparer.OrdinalIgnoreCase);
+private static readonly Brush HeaderFilterIdleBrush =
+    new SolidColorBrush(Color.FromRgb(152, 162, 179));
+private static readonly Brush HeaderFilterActiveBrush =
+    new SolidColorBrush(Color.FromRgb(21, 112, 239));
 private static ProgressBar _progress;
 private static Button _browseRootButton;
 private static Button _applyButton;
@@ -3106,6 +3120,11 @@ private static void FindControls(Window win)
     _gridFilterText = (TextBox)win.FindName("GridFilterText");
     _gridStatusFilterCombo = (ComboBox)win.FindName("GridStatusFilterCombo");
     _gridFilterCountText = (TextBlock)win.FindName("GridFilterCountText");
+    _headerFilterPopup = (Popup)win.FindName("HeaderFilterPopup");
+    _headerFilterTitle = (TextBlock)win.FindName("HeaderFilterTitle");
+    _headerFilterTextBox = (TextBox)win.FindName("HeaderFilterTextBox");
+    _btnHeaderFilterApply = (Button)win.FindName("BtnHeaderFilterApply");
+    _btnHeaderFilterClear = (Button)win.FindName("BtnHeaderFilterClear");
     _progress = (ProgressBar)win.FindName("Progress");
     _browseRootButton = (Button)win.FindName("BrowseRootButton");
     _applyButton = (Button)win.FindName("BtnApply");
@@ -3167,6 +3186,10 @@ private static void ResetRuntimeState()
     UpdatePerfText();
     _templateHashCheckKey = null;
     _templateHashCheckValue = false;
+    _columnFilters.Clear();
+    _activeHeaderFilterKey = "";
+    if (_headerFilterPopup != null)
+        _headerFilterPopup.IsOpen = false;
     _suppressPresetSelection = false;
     _suppressEvents = false;
     _suppressEditor = false;
@@ -3257,7 +3280,18 @@ private static void AttachEvents(Window win)
     if (_gridStatusFilterCombo != null)
         _gridStatusFilterCombo.SelectionChanged += delegate { ApplyGridFilter(); };
     if (_grid != null)
+    {
         _grid.Sorting += PreviewGrid_Sorting;
+        _grid.PreviewMouseLeftButtonDown += GridHeaderFilter_PreviewMouseDown;
+        CollectHeaderFilterGlyphs();
+        UpdateHeaderFilterIndicators();
+    }
+    if (_btnHeaderFilterApply != null)
+        _btnHeaderFilterApply.Click += HeaderFilterApply_Click;
+    if (_btnHeaderFilterClear != null)
+        _btnHeaderFilterClear.Click += HeaderFilterClear_Click;
+    if (_headerFilterTextBox != null)
+        _headerFilterTextBox.KeyDown += HeaderFilterTextBox_KeyDown;
 
     AttachClick("BtnTokenYyyy", TokenButton_Click);
     AttachClick("BtnTokenMm", TokenButton_Click);
@@ -3321,7 +3355,7 @@ private static void AttachToolTips()
     SetTip(_prefixText, "校验码前缀，默认“[”。\n直接位于“算法-校验码”左侧，不再额外套固定方括号。");
     SetTip(_suffixText, "校验码后缀，默认“]”。\n直接位于“算法-校验码”右侧。");
     SetTip(_editor, "目标路径模板。\n点击右侧胶囊可在光标位置插入变量。\n【根路径】可与相对子目录组合；也可直接写绝对路径。\n输出统一使用Windows反斜杠；非法字符、保留设备名、超长路径会在顶部报错。");
-    SetTip(_grid, "源路径、目标路径与动作预览。\n鼠标悬浮行可查看四类日期、生效日期、校验码、目标路径和完整错误。\n红底=异常，黄底=校验码计算中，灰底=跳过，绿底=执行成功。");
+    SetTip(_grid, "源路径、目标路径与动作预览。\n点击表头▼可按该列筛选，点击其他位置排序；筛选只影响显示。\n鼠标悬浮行可查看四类日期、生效日期、校验码、目标路径和完整状态/错误。\n红底=异常，黄底=校验码计算中，灰底=跳过，绿底=执行成功。");
     SetTip(_statusText, "状态统计：文件总数、跳过项、就绪/异常/计算中数量与校验码进度。\n实时刷新关闭且配置变更后会提示需要手动预览。");
     SetTipByName("BtnCancel", "关闭窗口。\n未执行时：放弃输出，两个输出列表保持为空。\n执行中：询问是否停止；已开始的文件操作会完成，未开始的项目不再执行。");
     SetTip(_applyButton, "方案1：按钮显示为【执行】，生成并输出三个非跳过列表（原路径、目标路径、动作），然后关闭窗口继续 Quicker 后续动作；不会修改文件。\n完整开发版：生成两个列表/预设并关闭窗口。\n存在异常行时需确认，仅输出就绪行；校验码未算完时需等待。");
@@ -3409,7 +3443,9 @@ private static bool IsGridFilterActive()
         _gridFilterText.Text.Trim().Length > 0)
         return true;
     string tag = GetComboTag(_gridStatusFilterCombo);
-    return tag != null && tag.Length > 0 && tag != "all";
+    if (tag != null && tag.Length > 0 && tag != "all")
+        return true;
+    return _columnFilters.Count > 0;
 }
 
 private static bool GridRowFilter(object value)
@@ -3423,6 +3459,18 @@ private static bool GridRowFilter(object value)
     {
         if (GetRowFilterState(item) != statusTag)
             return false;
+    }
+
+    // 表头逐列筛选：所有条件同时满足才显示。
+    if (_columnFilters.Count > 0)
+    {
+        foreach (KeyValuePair<string, string> pair in _columnFilters)
+        {
+            if (pair.Value == null || pair.Value.Length == 0)
+                continue;
+            if (!ContainsText(item, pair.Key, pair.Value))
+                return false;
+        }
     }
 
     string filter = _gridFilterText == null || _gridFilterText.Text == null
@@ -3468,10 +3516,170 @@ private static void UpdateGridFilterCount()
         return;
     int shown = _grid.Items.Count;
     int total = _rows.Count;
-    _gridFilterCountText.Text = shown == total
+    string text = shown == total
         ? "共 " + total.ToString(CultureInfo.InvariantCulture) + " 行"
         : "显示 " + shown.ToString(CultureInfo.InvariantCulture) + " / " +
             total.ToString(CultureInfo.InvariantCulture) + " 行";
+    if (_columnFilters.Count > 0)
+        text += "；列筛选 " + _columnFilters.Count.ToString(CultureInfo.InvariantCulture) + " 项";
+    _gridFilterCountText.Text = text;
+}
+
+// ---------------------------- 表头逐列筛选 ----------------------------
+
+// 收集各列表头的筛选标记，供路由事件和状态着色使用。
+private static void CollectHeaderFilterGlyphs()
+{
+    _headerFilterGlyphs.Clear();
+    if (_grid == null)
+        return;
+    foreach (DataGridColumn column in _grid.Columns)
+    {
+        StackPanel panel = column.Header as StackPanel;
+        if (panel == null)
+            continue;
+        foreach (UIElement child in panel.Children)
+        {
+            TextBlock glyph = child as TextBlock;
+            if (glyph == null)
+                continue;
+            string key = glyph.Tag as string;
+            if (key != null && key.Length > 0)
+                _headerFilterGlyphs[key] = glyph;
+        }
+    }
+}
+
+private static void GridHeaderFilter_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+{
+    TextBlock glyph = FindHeaderFilterGlyph(e.OriginalSource as DependencyObject);
+    if (glyph == null)
+        return;
+    // 点击筛选标记只打开筛选框，不触发表头排序。
+    e.Handled = true;
+    OpenHeaderFilterPopup(glyph);
+}
+
+private static TextBlock FindHeaderFilterGlyph(DependencyObject source)
+{
+    while (source != null)
+    {
+        TextBlock text = source as TextBlock;
+        if (text != null)
+        {
+            string key = text.Tag as string;
+            if (key != null && _headerFilterGlyphs.ContainsKey(key))
+                return text;
+        }
+        if (source is Visual || source is System.Windows.Media.Media3D.Visual3D)
+            source = VisualTreeHelper.GetParent(source);
+        else if (source is FrameworkContentElement)
+            source = ((FrameworkContentElement)source).Parent;
+        else
+            source = null;
+    }
+    return null;
+}
+
+private static void OpenHeaderFilterPopup(TextBlock glyph)
+{
+    if (_headerFilterPopup == null || _headerFilterTextBox == null)
+        return;
+    _activeHeaderFilterKey = (string)glyph.Tag;
+    string existing;
+    if (!_columnFilters.TryGetValue(_activeHeaderFilterKey, out existing))
+        existing = "";
+    if (_headerFilterTitle != null)
+        _headerFilterTitle.Text = "筛选：" + GetColumnFilterLabel(_activeHeaderFilterKey);
+    _headerFilterTextBox.Text = existing;
+    _headerFilterPopup.PlacementTarget = glyph;
+    _headerFilterPopup.Placement = PlacementMode.Bottom;
+    _headerFilterPopup.IsOpen = true;
+    // Popup 首次打开时子元素尚未完成加载，延后一帧再设置焦点。
+    _headerFilterPopup.Dispatcher.BeginInvoke(new Action(delegate()
+    {
+        if (_headerFilterPopup == null || _headerFilterTextBox == null ||
+            !_headerFilterPopup.IsOpen)
+            return;
+        _headerFilterTextBox.Focus();
+        _headerFilterTextBox.SelectAll();
+    }));
+}
+
+private static void HeaderFilterApply_Click(object sender, RoutedEventArgs e)
+{
+    ApplyHeaderFilter();
+}
+
+private static void HeaderFilterClear_Click(object sender, RoutedEventArgs e)
+{
+    if (_activeHeaderFilterKey.Length == 0)
+        return;
+    _columnFilters.Remove(_activeHeaderFilterKey);
+    if (_headerFilterTextBox != null)
+        _headerFilterTextBox.Text = "";
+    CloseHeaderFilterPopup();
+    UpdateHeaderFilterIndicators();
+    ApplyGridFilter();
+}
+
+private static void HeaderFilterTextBox_KeyDown(object sender, KeyEventArgs e)
+{
+    if (e.Key == Key.Enter)
+    {
+        ApplyHeaderFilter();
+        e.Handled = true;
+    }
+    else if (e.Key == Key.Escape)
+    {
+        CloseHeaderFilterPopup();
+        e.Handled = true;
+    }
+}
+
+private static void ApplyHeaderFilter()
+{
+    if (_activeHeaderFilterKey.Length == 0)
+        return;
+    string text = _headerFilterTextBox == null || _headerFilterTextBox.Text == null
+        ? "" : _headerFilterTextBox.Text.Trim();
+    if (text.Length == 0)
+        _columnFilters.Remove(_activeHeaderFilterKey);
+    else
+        _columnFilters[_activeHeaderFilterKey] = text;
+    CloseHeaderFilterPopup();
+    UpdateHeaderFilterIndicators();
+    ApplyGridFilter();
+}
+
+private static void CloseHeaderFilterPopup()
+{
+    if (_headerFilterPopup != null)
+        _headerFilterPopup.IsOpen = false;
+}
+
+private static string GetColumnFilterLabel(string key)
+{
+    if (key == "Action") return "动作";
+    if (key == "StatusDisplay") return "状态";
+    if (key == "SourcePath") return "源路径名";
+    if (key == "TargetPath") return "目标路径名/文件名";
+    if (key == "ExecDetails") return "执行结果";
+    return key;
+}
+
+// 有筛选条件的列把标记显示为蓝色，并提示当前条件。
+private static void UpdateHeaderFilterIndicators()
+{
+    foreach (KeyValuePair<string, TextBlock> pair in _headerFilterGlyphs)
+    {
+        string text;
+        bool active = _columnFilters.TryGetValue(pair.Key, out text);
+        pair.Value.Foreground = active ? HeaderFilterActiveBrush : HeaderFilterIdleBrush;
+        pair.Value.ToolTip = active
+            ? "本列筛选：" + text + "\n点击修改或清除"
+            : "按此列筛选";
+    }
 }
 
 private static void PreviewGrid_Sorting(object sender, DataGridSortingEventArgs e)
@@ -4362,6 +4570,7 @@ private static Dictionary<string, object> BuildFileItem(string path, out bool is
         item["ExecState"] = "";
         item["ExecDetails"] = "";
         item["Status"] = "";
+        item["StatusDisplay"] = "";
         item["Error"] = "";
         item["HasError"] = false;
         item["IsPending"] = false;
@@ -5106,6 +5315,7 @@ private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
         item["Action"] = layout == null || layout.Action == null ? "" : layout.Action;
         item["Status"] = layout == null || layout.Status == null ? "" : layout.Status;
         item["Error"] = layout == null || layout.Error == null ? "" : layout.Error;
+        UpdateStatusDisplay(item);
         item["HasError"] = layout != null && layout.HasError;
         item["IsPending"] = layout != null && layout.IsPending;
         item["HashPending"] = layout != null && layout.HashPending;
@@ -5333,6 +5543,26 @@ private static void SetRowError(Dictionary<string, object> item, string message,
     item["IsPending"] = false;
     item["Error"] = message;
     item["Status"] = status;
+    UpdateStatusDisplay(item);
+}
+
+// 状态列同时显示状态与异常信息，异常为空时只显示状态。
+private static string BuildStatusDisplay(string status, string error)
+{
+    string statusText = status == null ? "" : status;
+    string errorText = error == null ? "" : error;
+    if (errorText.Length == 0)
+        return statusText;
+    if (statusText.Length == 0)
+        return errorText;
+    return statusText + "：" + errorText;
+}
+
+private static void UpdateStatusDisplay(Dictionary<string, object> item)
+{
+    item["StatusDisplay"] = BuildStatusDisplay(
+        Convert.ToString(item["Status"], CultureInfo.InvariantCulture),
+        Convert.ToString(item["Error"], CultureInfo.InvariantCulture));
 }
 
 private static bool GetBool(Dictionary<string, object> item, string key)
@@ -6907,6 +7137,7 @@ private static void ReportExecutionRow(Dictionary<string, object> item, bool suc
                     item["IsPending"] = false;
                     item["Error"] = message == null ? "执行失败" : message;
                 }
+                UpdateStatusDisplay(item);
                 RefreshRowDetails(item);
                 _execUiDirty = true;
             }
@@ -7346,6 +7577,8 @@ private static void Window_Closed(object sender, EventArgs e)
         _gridFilterTimer.Stop();
         _gridFilterTimer = null;
     }
+    if (_headerFilterPopup != null)
+        _headerFilterPopup.IsOpen = false;
 
     _window = null;
     _grid = null;
@@ -7364,6 +7597,14 @@ private static void Window_Closed(object sender, EventArgs e)
     _gridFilterText = null;
     _gridStatusFilterCombo = null;
     _gridFilterCountText = null;
+    _headerFilterPopup = null;
+    _headerFilterTitle = null;
+    _headerFilterTextBox = null;
+    _btnHeaderFilterApply = null;
+    _btnHeaderFilterClear = null;
+    _activeHeaderFilterKey = "";
+    _columnFilters.Clear();
+    _headerFilterGlyphs.Clear();
     _progress = null;
     _browseRootButton = null;
     _applyButton = null;

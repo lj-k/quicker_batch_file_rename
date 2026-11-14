@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.13 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.14 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -43,6 +43,16 @@
 
         <Style x:Key="GridCellText" TargetType="TextBlock">
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+
+        <Style x:Key="HeaderFilterGlyph" TargetType="TextBlock">
+            <Setter Property="Text" Value="▼"/>
+            <Setter Property="FontSize" Value="8"/>
+            <Setter Property="Foreground" Value="#98A2B3"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="5,0,0,0"/>
+            <Setter Property="ToolTip" Value="按此列筛选"/>
         </Style>
 
         <Style x:Key="CardBorder" TargetType="Border">
@@ -512,47 +522,49 @@
                           VirtualizingPanel.IsVirtualizing="True"
                           VirtualizingPanel.VirtualizationMode="Recycling">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="动作" Binding="{Binding [Action]}" SortMemberPath="Action" Width="78"
-                                            ElementStyle="{StaticResource GridCellText}"/>
-                        <DataGridTextColumn Header="状态" Binding="{Binding [Status]}" SortMemberPath="Status" Width="120"
-                                            ElementStyle="{StaticResource GridCellText}"/>
-                        <DataGridTextColumn Header="源路径名" Binding="{Binding [SourcePath]}" SortMemberPath="SourcePath" Width="2*" MinWidth="180"
-                                            ElementStyle="{StaticResource GridCellText}"/>
-                        <DataGridTextColumn Header="目标路径名/文件名" Binding="{Binding [TargetPath]}" SortMemberPath="TargetPath" Width="3*" MinWidth="240"
-                                            ElementStyle="{StaticResource GridCellText}"/>
-                        <DataGridTemplateColumn Header="异常状态" SortMemberPath="Error" Width="1.4*" MinWidth="120">
-                            <DataGridTemplateColumn.CellTemplate>
-                                <DataTemplate>
-                                    <Grid>
-                                        <TextBlock Text="{Binding [Error]}" TextTrimming="CharacterEllipsis">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Visibility" Value="Visible"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding [Error]}" Value="">
-                                                            <Setter Property="Visibility" Value="Collapsed"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                        <TextBlock Text="—">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding [Error]}" Value="">
-                                                            <Setter Property="Visibility" Value="Visible"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                    </Grid>
-                                </DataTemplate>
-                            </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
-                        <DataGridTemplateColumn Header="执行结果" SortMemberPath="ExecDetails" Width="1.4*" MinWidth="120">
+                        <DataGridTextColumn Binding="{Binding [Action]}" SortMemberPath="Action" Width="78"
+                                            ElementStyle="{StaticResource GridCellText}">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="动作" VerticalAlignment="Center"/>
+                                    <TextBlock Tag="Action" Style="{StaticResource HeaderFilterGlyph}"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding [StatusDisplay]}" SortMemberPath="StatusDisplay" Width="104"
+                                            ElementStyle="{StaticResource GridCellText}">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="状态" VerticalAlignment="Center"/>
+                                    <TextBlock Tag="StatusDisplay" Style="{StaticResource HeaderFilterGlyph}"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding [SourcePath]}" SortMemberPath="SourcePath" Width="2*" MinWidth="180"
+                                            ElementStyle="{StaticResource GridCellText}">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="源路径名" VerticalAlignment="Center"/>
+                                    <TextBlock Tag="SourcePath" Style="{StaticResource HeaderFilterGlyph}"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTextColumn Binding="{Binding [TargetPath]}" SortMemberPath="TargetPath" Width="3*" MinWidth="240"
+                                            ElementStyle="{StaticResource GridCellText}">
+                            <DataGridTextColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="目标路径名/文件名" VerticalAlignment="Center"/>
+                                    <TextBlock Tag="TargetPath" Style="{StaticResource HeaderFilterGlyph}"/>
+                                </StackPanel>
+                            </DataGridTextColumn.Header>
+                        </DataGridTextColumn>
+                        <DataGridTemplateColumn SortMemberPath="ExecDetails" Width="160">
+                            <DataGridTemplateColumn.Header>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="执行结果" VerticalAlignment="Center"/>
+                                    <TextBlock Tag="ExecDetails" Style="{StaticResource HeaderFilterGlyph}"/>
+                                </StackPanel>
+                            </DataGridTemplateColumn.Header>
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <Grid>
@@ -728,6 +740,49 @@
                 <!-- RELEASE-FINISH-END -->
             </StackPanel>
         </Grid>
+
+        <Popup x:Name="HeaderFilterPopup"
+               Placement="Bottom"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               PopupAnimation="Fade">
+            <Border Background="#FFFFFF"
+                    BorderBrush="{StaticResource FieldBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="10"
+                    MinWidth="260">
+                <StackPanel>
+                    <TextBlock x:Name="HeaderFilterTitle"
+                               Text="筛选"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource TextBrush}"
+                               Margin="0,0,0,6"/>
+                    <TextBox x:Name="HeaderFilterTextBox"
+                             Height="28"
+                             Padding="6,0"
+                             VerticalContentAlignment="Center"
+                             BorderBrush="{StaticResource FieldBorderBrush}"/>
+                    <TextBlock Text="包含匹配，不区分大小写；回车应用，Esc关闭"
+                               Foreground="{StaticResource MutedBrush}"
+                               FontSize="11"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                        <Button x:Name="BtnHeaderFilterClear"
+                                Content="清除"
+                                Style="{StaticResource ToolButton}"
+                                Width="64"
+                                Margin="0"/>
+                        <Button x:Name="BtnHeaderFilterApply"
+                                Content="应用"
+                                Style="{StaticResource PrimaryButton}"
+                                Width="64"
+                                Margin="8,0,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Popup>
 
         <Popup x:Name="PresetPopup"
                Placement="Bottom"
