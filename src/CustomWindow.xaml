@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.05.3 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -459,8 +459,7 @@
                       SelectionUnit="FullRow"
                       GridLinesVisibility="Horizontal"
                       HorizontalGridLinesBrush="#EAECF0"
-                      RowBackground="#FFFFFF"
-                      AlternatingRowBackground="#FAFBFC"
+                      AlternationCount="2"
                       RowHeight="31"
                       ColumnHeaderHeight="34"
                       BorderThickness="0"
@@ -478,22 +477,23 @@
                         <Setter Property="ToolTipService.ShowDuration" Value="60000"/>
                         <Setter Property="ToolTipService.InitialShowDelay" Value="250"/>
                         <Setter Property="MinHeight" Value="31"/>
+                        <Setter Property="Background" Value="#FFFFFF"/>
+                        <Setter Property="Foreground" Value="#344054"/>
                         <Style.Triggers>
+                            <DataTrigger Binding="{Binding RelativeSource={RelativeSource Self}, Path=(ItemsControl.AlternationIndex)}" Value="1">
+                                <Setter Property="Background" Value="#FAFBFC"/>
+                            </DataTrigger>
                             <DataTrigger Binding="{Binding [ExecState]}" Value="done">
                                 <Setter Property="Background" Value="#ECFDF3"/>
-                                <Setter Property="Foreground" Value="#027A48"/>
                             </DataTrigger>
                             <DataTrigger Binding="{Binding [HasError]}" Value="True">
                                 <Setter Property="Background" Value="#FFF1F0"/>
-                                <Setter Property="Foreground" Value="#B42318"/>
                             </DataTrigger>
                             <DataTrigger Binding="{Binding [IsPending]}" Value="True">
                                 <Setter Property="Background" Value="#FFFAEB"/>
-                                <Setter Property="Foreground" Value="#8A5A00"/>
                             </DataTrigger>
                             <DataTrigger Binding="{Binding [IsSkipped]}" Value="True">
                                 <Setter Property="Background" Value="#F2F4F7"/>
-                                <Setter Property="Foreground" Value="#667085"/>
                             </DataTrigger>
                         </Style.Triggers>
                     </Style>
@@ -508,6 +508,7 @@
             </DataGrid>
         </Border>
 
+        <!-- RELEASE-EXEC-BEGIN -->
         <Border Grid.Row="4"
                 Background="#FFFFFF"
                 BorderBrush="{StaticResource SoftBorderBrush}"
@@ -564,6 +565,7 @@
                 </StackPanel>
             </Grid>
         </Border>
+        <!-- RELEASE-EXEC-END -->
 
         <Grid Grid.Row="5">
             <Grid.ColumnDefinitions>
@@ -590,7 +592,10 @@
             </Grid>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <Button x:Name="BtnCancel" Content="取消" Style="{StaticResource ToolButton}" Width="80"/>
+                <!-- RELEASE-APPLY-BEGIN -->
                 <Button x:Name="BtnApply" Content="生成输出" Style="{StaticResource PrimaryButton}" Width="110" IsEnabled="False"/>
+                <!-- RELEASE-APPLY-END -->
+                <Button x:Name="BtnFinish" Content="完成" Style="{StaticResource PrimaryButton}" Width="100" Margin="8,0,0,0"/>
             </StackPanel>
         </Grid>
 

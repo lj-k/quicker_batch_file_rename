@@ -55,10 +55,14 @@ required = {
     "BtnTokenYyyy", "BtnTokenMm", "BtnTokenDd", "BtnTokenRoot",
     "BtnTokenName", "BtnTokenExt", "BtnTokenHash",
     "ConfigPanel", "ExecParallelCombo", "ExecVerifyCheck", "BtnExecute",
-    "ExecProgress", "ExecStatusText",
+    "ExecProgress", "ExecStatusText", "BtnFinish",
 }
 check(required <= xaml_names, "all required controls are named in XAML")
 check('Header="动作"' in xaml_text, "DataGrid has action column")
+check('Binding="{Binding [ExecState]}" Value="done"' in xaml_text,
+      "DataGrid has execution state background trigger")
+check('Property="Foreground" Value="#027A48"' not in xaml_text,
+      "execution state does not change font color")
 
 dist_text = (ROOT / "dist" / "QuickerAux.cs").read_text(encoding="utf-8")
 dist_code = "\n".join(
@@ -71,22 +75,24 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.05.3", "deployed code version is 0.05.3")
+check(dist_text.splitlines()[1] == "// 版本：0.06", "deployed code version is 0.06")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("ExecuteOneFile" in dist_text, "deployed code contains execution worker")
 check("CopyFileAdaptive" in dist_text, "deployed code contains adaptive transfer engine")
-check('"actions"' in dist_text, "deployed code outputs action list")
+check("DeliveryMode" in dist_text, "deployed code contains delivery mode")
+check("Finish_Click" in dist_text, "deployed code contains finish handler")
+check('"actions"' not in dist_text, "deployed code does not output action list")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.05.3" in core_text, "core source version is 0.05.3")
+check("// 版本：0.06" in core_text, "core source version is 0.06")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("ShouldSkipByFilter" in core_text, "core contains filter decision")
 check("ResolveAction" in core_text, "core contains action resolution")
 check("CopyFileWithRetry" in core_text, "core contains copy retry engine")
 check("SelectCopyBufferSizeForDrive" in core_text, "core contains drive buffer profile")
-check('// 版本：0.05.3' in aux_text, "aux source version is 0.05.3")
-check("XAML 版本：0.05.3" in xaml_text, "XAML version is 0.05.3")
+check('// 版本：0.06' in aux_text, "aux source version is 0.06")
+check("XAML 版本：0.06" in xaml_text, "XAML version is 0.06")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -109,13 +115,14 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check(req_text.count("0.0.7") == 1 and "> 版本：0.0.7" in req_text, "requirements doc version 0.0.7 is unique")
+check(req_text.count("0.0.8") == 1 and "> 版本：0.0.8" in req_text, "requirements doc version 0.0.8 is unique")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
+check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
 
 for name, version in [
-    ("doc/开发说明.md", "0.05.3"),
-    ("doc/测试报告.md", "0.05.3"),
+    ("doc/开发说明.md", "0.06"),
+    ("doc/测试报告.md", "0.06"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -127,16 +134,43 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.05.3]" in changelog_text, "CHANGELOG has 0.05.3 entry")
+    check("[0.06]" in changelog_text, "CHANGELOG has 0.06 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
 agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-check("版本：0.01" in agents, "AGENTS.md has version 0.01")
+check("版本：0.02" in agents, "AGENTS.md has version 0.02")
 check("所有的用户输入完整记录在userinput文件夹" in agents, "AGENTS.md keeps user rule")
+check("共享代码，一同开发、更新和交付" in agents,
+      "AGENTS.md keeps shared delivery rule")
 
 inputs = sorted((ROOT / "userinput").glob("*.md"))
-check(len(inputs) >= 8, "userinput contains at least 8 records")
+check(len(inputs) >= 9, "userinput contains at least 9 records")
+
+release = ROOT / "release"
+s1 = release / "方案1-仅重命名不执行"
+s2 = release / "方案2-执行不输出列表"
+for folder in [s1, s2]:
+    check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
+    check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06",
+          str(folder.name) + " Aux version 0.06")
+
+s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
+s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")
+check("BtnExecute" not in s1_xaml, "scheme1 has no execute button")
+check("ExecParallelCombo" not in s1_xaml, "scheme1 has no execution config")
+check("BtnApply" in s1_xaml and "BtnFinish" in s1_xaml, "scheme1 has apply and finish")
+check("BtnApply" not in s2_xaml, "scheme2 has no apply button")
+check("BtnExecute" in s2_xaml and "BtnFinish" in s2_xaml, "scheme2 has execute and finish")
+check("private static readonly int DeliveryMode = 1;" in (s1 / "QuickerAux.cs").read_text(encoding="utf-8"),
+      "scheme1 delivery mode 1")
+check("private static readonly int DeliveryMode = 2;" in (s2 / "QuickerAux.cs").read_text(encoding="utf-8"),
+      "scheme2 delivery mode 2")
+check("RELEASE-EXEC" not in s1_xaml and "RELEASE-APPLY" not in s1_xaml,
+      "scheme1 xaml markers removed")
+check("RELEASE-EXEC" not in s2_xaml and "RELEASE-APPLY" not in s2_xaml,
+      "scheme2 xaml markers removed")
 
 for note in notes:
     print(note)

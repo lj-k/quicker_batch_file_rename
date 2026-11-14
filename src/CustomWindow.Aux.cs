@@ -26,11 +26,15 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.05.3
+// 版本：0.06
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
 // ============================================================================
+
+// 交付模式：0=完整开发版；1=仅重命名不执行；2=执行不输出列表。
+// 发布脚本会把该常量替换为对应方案的值。
+private static readonly int DeliveryMode = 0;
 
 private static Window _window;
 private static IDictionary<string, object> _data;
@@ -50,6 +54,7 @@ private static TextBlock _statusText;
 private static ProgressBar _progress;
 private static Button _browseRootButton;
 private static Button _applyButton;
+private static Button _finishButton;
 private static Button _previewButton;
 private static CheckBox _realTimeCheck;
 private static TextBox _filterExtensionsText;
@@ -145,9 +150,12 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
             dataContext["startYear"] = 2000;
 
         // 取消或直接关闭窗口时，输出为空列表，避免残留上一次的结果。
-        dataContext["origPaths"] = new List<object>();
-        dataContext["targetPaths"] = new List<object>();
-        dataContext["actions"] = new List<object>();
+        // 交付方案2不生成/输出列表变量。
+        if (DeliveryMode != 2)
+        {
+            dataContext["origPaths"] = new List<object>();
+            dataContext["targetPaths"] = new List<object>();
+        }
     }
 }
 
@@ -173,7 +181,7 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
     if (_paths.Count == 0)
     {
         _statusText.Text = "没有可处理的文件" + DescribeSkipped();
-        _applyButton.IsEnabled = false;
+        SetApplyEnabled(false);
         return;
     }
 
@@ -204,6 +212,7 @@ private static void FindControls(Window win)
     _progress = (ProgressBar)win.FindName("Progress");
     _browseRootButton = (Button)win.FindName("BrowseRootButton");
     _applyButton = (Button)win.FindName("BtnApply");
+    _finishButton = (Button)win.FindName("BtnFinish");
     _previewButton = (Button)win.FindName("BtnPreview");
     _realTimeCheck = (CheckBox)win.FindName("RealTimeCheck");
     _filterExtensionsText = (TextBox)win.FindName("FilterExtensionsText");
@@ -343,6 +352,7 @@ private static void AttachEvents(Window win)
     AttachClick("BtnPreview", Preview_Click);
     AttachClick("BtnCancel", Cancel_Click);
     AttachClick("BtnApply", Apply_Click);
+    AttachClick("BtnFinish", Finish_Click);
     AttachClick("BtnExecute", Execute_Click);
 
     win.Closed += Window_Closed;
@@ -392,6 +402,7 @@ private static void AttachToolTips()
     SetTip(_statusText, "状态统计：文件总数、跳过项、就绪/异常/计算中数量与校验码进度。\n实时刷新关闭且配置变更后会提示需要手动预览。");
     SetTipByName("BtnCancel", "关闭窗口。\n未执行时：放弃输出，两个输出列表保持为空。\n执行中：询问是否停止；已开始的文件操作会完成，未开始的项目不再执行。");
     SetTip(_applyButton, "生成两个等长、序号配对的输出列表和预设词典。\n存在异常行时需确认，仅输出就绪行；校验码未算完时需等待。");
+    SetTip(_finishButton, "完成并关闭窗口，继续执行 Quicker 后续动作步骤。\n方案1会写回两个非跳过路径列表；方案2不生成/输出列表变量，只写回预设。");
     SetTip(_execParallelCombo, "执行并行线程数，1~8。\n数值越大复制/移动越快，但会占用更多磁盘与CPU资源。\n重命名操作本身很快，通常无需高并行。");
     SetTip(_execVerifyCheck, "执行后校验。\n复制/移动完成后重新计算目标文件校验码，与源文件校验码比较；\n若模板包含【校验码】，还会检查目标文件名中的校验码标记是否一致。\n重命名不执行该校验。大文件会明显增加耗时。");
     SetTip(_executeButton, "按展示列表的“动作”列执行复制/移动/重命名。\n跳过行、异常行和校验码计算中的行不会执行。\n目标目录不存在时自动创建；目标文件已存在时该项报错，不会覆盖。\n执行期间配置区禁用，可点击取消停止尚未开始的项目。");
@@ -1746,6 +1757,8 @@ private static void UpdateStatus()
     _previewButton.IsEnabled = (!realTime && !_scanning);
     if (_executeButton != null)
         _executeButton.IsEnabled = false;
+    if (_finishButton != null)
+        _finishButton.IsEnabled = (!_scanning && !_executing);
 
     if (_executing)
         return;
@@ -1753,7 +1766,7 @@ private static void UpdateStatus()
     if (_previewDirty && !_scanning)
     {
         _statusText.Text = "配置已变更，点击【预览】刷新目标路径";
-        _applyButton.IsEnabled = false;
+        SetApplyEnabled(false);
         _progress.Visibility = Visibility.Collapsed;
         return;
     }
@@ -1761,14 +1774,14 @@ private static void UpdateStatus()
     if (_scanning)
     {
         _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
-        _applyButton.IsEnabled = false;
+        SetApplyEnabled(false);
         return;
     }
 
     if (_files.Count == 0)
     {
         _statusText.Text = "没有可处理的文件" + DescribeSkipped();
-        _applyButton.IsEnabled = false;
+        SetApplyEnabled(false);
         _progress.Visibility = Visibility.Collapsed;
         return;
     }
@@ -1785,7 +1798,7 @@ private static void UpdateStatus()
         text += "（" + _hashDone + "/" + _hashTotal + "）";
     _statusText.Text = text;
 
-    _applyButton.IsEnabled = (!_scanning && pending == 0 && ready > 0);
+    SetApplyEnabled(!_scanning && pending == 0 && ready > 0);
     if (_executeButton != null)
         _executeButton.IsEnabled = (!_scanning && pending == 0 && ready > 0 && !_executing);
     if (pending > 0 && TemplateContainsToken(_config["template"], "【校验码】"))
@@ -2622,6 +2635,9 @@ private static string PromptForPresetName(string initialName)
 
 private static void Apply_Click(object sender, RoutedEventArgs e)
 {
+    if (DeliveryMode == 2)
+        return;
+
     if (_scanning)
     {
         MessageBox.Show("正在读取文件属性，请稍候。", "批量重命名器",
@@ -2660,6 +2676,58 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
             return;
     }
 
+    WriteOutputs(BuildReadyOutputRows());
+    EnsureDefaultPreset();
+
+    if (_window != null)
+        _window.Close();
+}
+
+private static void Finish_Click(object sender, RoutedEventArgs e)
+{
+    if (_executing)
+        return;
+
+    if (DeliveryMode == 2)
+    {
+        // 执行方案不生成/输出列表变量，只写回预设并继续 Quicker 后续步骤。
+        EnsureDefaultPreset();
+        if (_window != null)
+            _window.Close();
+        return;
+    }
+
+    if (_scanning)
+    {
+        MessageBox.Show("正在读取文件属性，请稍候。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+    RefreshPreviewNow();
+
+    int ready;
+    int errors;
+    int pending;
+    CountRows(out ready, out errors, out pending);
+    if (pending > 0)
+    {
+        MessageBox.Show("校验码仍在计算中，请稍候。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    WriteOutputs(BuildReadyOutputRows());
+    EnsureDefaultPreset();
+
+    if (_window != null)
+        _window.Close();
+}
+
+private static List<Dictionary<string, object>> BuildReadyOutputRows()
+{
     List<Dictionary<string, object>> outputRows = new List<Dictionary<string, object>>();
     for (int i = 0; i < _files.Count; i++)
     {
@@ -2671,12 +2739,7 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
             continue;
         outputRows.Add(item);
     }
-
-    WriteOutputs(outputRows);
-    EnsureDefaultPreset();
-
-    if (_window != null)
-        _window.Close();
+    return outputRows;
 }
 
 private static void Cancel_Click(object sender, RoutedEventArgs e)
@@ -2691,6 +2754,8 @@ private static void Cancel_Click(object sender, RoutedEventArgs e)
 
 private static void Execute_Click(object sender, RoutedEventArgs e)
 {
+    if (DeliveryMode == 1)
+        return;
     if (_executing)
         return;
 
@@ -3116,6 +3181,12 @@ private static void PostExecutionCompleted()
     }
 }
 
+private static void SetApplyEnabled(bool enabled)
+{
+    if (_applyButton != null)
+        _applyButton.IsEnabled = enabled;
+}
+
 private static void SetExecutionUiEnabled(bool enabled)
 {
     if (_configPanel != null)
@@ -3128,6 +3199,8 @@ private static void SetExecutionUiEnabled(bool enabled)
         _savePresetButton.IsEnabled = enabled;
     if (_realTimeCheck != null)
         _realTimeCheck.IsEnabled = enabled;
+    if (_finishButton != null)
+        _finishButton.IsEnabled = enabled;
     if (_execParallelCombo != null)
         _execParallelCombo.IsEnabled = enabled;
     if (_execVerifyCheck != null)
@@ -3143,12 +3216,11 @@ private static void SetExecutionUiEnabled(bool enabled)
 
 private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
 {
-    if (_data == null)
+    if (_data == null || DeliveryMode == 2)
         return;
 
     List<object> originalPaths = new List<object>();
     List<object> targetPaths = new List<object>();
-    List<object> actions = new List<object>();
     for (int i = 0; i < sourceRows.Count; i++)
     {
         Dictionary<string, object> item = sourceRows[i];
@@ -3162,10 +3234,9 @@ private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
             continue;
         originalPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
         targetPaths.Add(target);
-        actions.Add(action);
     }
 
-    if (originalPaths.Count != targetPaths.Count || originalPaths.Count != actions.Count)
+    if (originalPaths.Count != targetPaths.Count)
     {
         MessageBox.Show("输出列表配对失败，请重试。", "批量重命名器",
             MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -3174,7 +3245,6 @@ private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
 
     _data["origPaths"] = originalPaths;
     _data["targetPaths"] = targetPaths;
-    _data["actions"] = actions;
 }
 
 private static void EnsureDefaultPreset()
@@ -3433,6 +3503,7 @@ private static void Window_Closed(object sender, EventArgs e)
     _progress = null;
     _browseRootButton = null;
     _applyButton = null;
+    _finishButton = null;
     _previewButton = null;
     _realTimeCheck = null;
     _filterExtensionsText = null;
