@@ -11,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.15
+// 版本：0.06.16
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -27,6 +27,7 @@ public static readonly string[] PresetConfigKeys = new string[] {
     "filterExtensions", "filterMode",
     "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
     "preferExifOnFilenameConflict",
+    "mergeAdjacentPathSegments", "mergeRepeatedPathSequences",
     "realTimePreview", "execParallel", "execVerify",
     "checksumAlgorithm", "checksumDigits", "checksumPrefix", "checksumSuffix",
     "template"
@@ -1847,6 +1848,16 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     string missingDateText, string baseName, string extension, string checksumBadge,
     IDictionary<string, string> values, out string targetPath, out string error)
 {
+    return TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
+        baseName, extension, checksumBadge, values, false, false, out targetPath, out error);
+}
+
+// 带路径合并选项的重载：合并只作用于模板生成的相对部分，不修改根路径本身。
+public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime? effectiveDate,
+    string missingDateText, string baseName, string extension, string checksumBadge,
+    IDictionary<string, string> values, bool mergeAdjacentSegments, bool mergeRepeatedSequences,
+    out string targetPath, out string error)
+{
     targetPath = null;
     error = null;
 
@@ -1893,7 +1904,8 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     values["【校验码】"] = checksumBadge == null ? "" : checksumBadge;
 
     string rendered = RenderTemplate(template, values);
-    string normalized = NormalizeTargetPath(rendered, rootDirectory, out error);
+    string normalized = NormalizeTargetPath(rendered, rootDirectory,
+        mergeAdjacentSegments, mergeRepeatedSequences, out error);
     if (normalized == null)
         return false;
 
@@ -1906,6 +1918,12 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
 
 public static string NormalizeTargetPath(string renderedPath, string rootDirectory, out string error)
 {
+    return NormalizeTargetPath(renderedPath, rootDirectory, false, false, out error);
+}
+
+public static string NormalizeTargetPath(string renderedPath, string rootDirectory,
+    bool mergeAdjacentSegments, bool mergeRepeatedSequences, out string error)
+{
     error = null;
     if (renderedPath == null)
     {
@@ -1915,6 +1933,7 @@ public static string NormalizeTargetPath(string renderedPath, string rootDirecto
 
     string path = renderedPath.Replace('/', '\\');
     path = CollapseBackslashes(path);
+    bool merge = mergeAdjacentSegments || mergeRepeatedSequences;
 
     bool rooted = IsRootedWindowsPath(path);
     if (!rooted)
@@ -1924,12 +1943,141 @@ public static string NormalizeTargetPath(string renderedPath, string rootDirecto
             error = "模板未包含【根路径】且根路径为空";
             return null;
         }
+        string relative = path.TrimStart('\\');
+        if (merge)
+            relative = MergeTargetPathSegments(relative, mergeAdjacentSegments, mergeRepeatedSequences);
         string root = CollapseBackslashes(rootDirectory.Replace('/', '\\')).TrimEnd('\\');
-        path = root + "\\" + path.TrimStart('\\');
+        path = root + "\\" + relative;
         path = CollapseBackslashes(path);
+    }
+    else if (merge)
+    {
+        path = MergeTargetPathSegments(path, mergeAdjacentSegments, mergeRepeatedSequences);
     }
 
     return path;
+}
+
+// 合并路径中连续重复的文件夹段；最后一段视为文件名，不参与合并。
+public static string MergeTargetPathSegments(string path, bool mergeAdjacentSegments,
+    bool mergeRepeatedSequences)
+{
+    if (path == null || path.Length == 0 ||
+        (!mergeAdjacentSegments && !mergeRepeatedSequences))
+        return path;
+
+    string prefix;
+    List<string> parts;
+    if (!TrySplitPathForMerge(path, out prefix, out parts) || parts.Count < 2)
+        return path;
+
+    List<string> dirs = new List<string>();
+    for (int i = 0; i < parts.Count - 1; i++)
+        dirs.Add(parts[i]);
+
+    bool changed;
+    do
+    {
+        changed = false;
+        if (mergeRepeatedSequences)
+        {
+            while (CollapseOneRepeatedSequence(dirs))
+                changed = true;
+        }
+        if (mergeAdjacentSegments)
+        {
+            while (CollapseOneAdjacentDuplicate(dirs))
+                changed = true;
+        }
+    }
+    while (changed);
+
+    StringBuilder builder = new StringBuilder();
+    builder.Append(prefix);
+    for (int i = 0; i < dirs.Count; i++)
+    {
+        if (i > 0)
+            builder.Append('\\');
+        builder.Append(dirs[i]);
+    }
+    if (dirs.Count > 0)
+        builder.Append('\\');
+    builder.Append(parts[parts.Count - 1]);
+    return builder.ToString();
+}
+
+// 拆分盘符/UNC 前缀与剩余路径段；无法识别标准根时返回 false，保持原路径不变。
+private static bool TrySplitPathForMerge(string path, out string prefix, out List<string> parts)
+{
+    prefix = "";
+    parts = new List<string>();
+    if (path == null || path.Length == 0)
+        return false;
+
+    string[] raw = path.Split('\\');
+    int start = 0;
+    if (IsRootedWindowsPath(path))
+    {
+        if (path.Length >= 3 && IsAsciiDriveLetter(path[0]) && path[1] == ':' && path[2] == '\\')
+        {
+            prefix = raw[0] + "\\";
+            start = 1;
+        }
+        else if (path.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            if (raw.Length < 4 || raw[2].Length == 0 || raw[3].Length == 0)
+                return false;
+            prefix = "\\\\" + raw[2] + "\\" + raw[3] + "\\";
+            start = 4;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    for (int i = start; i < raw.Length; i++)
+        parts.Add(raw[i]);
+    return parts.Count > 0;
+}
+
+// 合并最长的连续重复多级块（至少2段），每次删除后一块，直到没有重复。
+private static bool CollapseOneRepeatedSequence(List<string> dirs)
+{
+    int maxLength = dirs.Count / 2;
+    for (int length = maxLength; length >= 2; length--)
+    {
+        for (int start = 0; start + length * 2 <= dirs.Count; start++)
+        {
+            if (!PathBlocksEqual(dirs, start, start + length, length))
+                continue;
+            dirs.RemoveRange(start + length, length);
+            return true;
+        }
+    }
+    return false;
+}
+
+private static bool CollapseOneAdjacentDuplicate(List<string> dirs)
+{
+    for (int i = 0; i + 1 < dirs.Count; i++)
+    {
+        if (!string.Equals(dirs[i], dirs[i + 1], StringComparison.OrdinalIgnoreCase))
+            continue;
+        dirs.RemoveAt(i + 1);
+        return true;
+    }
+    return false;
+}
+
+private static bool PathBlocksEqual(List<string> dirs, int left, int right, int length)
+{
+    for (int i = 0; i < length; i++)
+    {
+        if (!string.Equals(dirs[left + i], dirs[right + i], StringComparison.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
 }
 
 private static string CollapseBackslashes(string path)
@@ -2129,6 +2277,8 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
     config["dateFallbackCustomText"] = "";
     config["preferExifOnFilenameConflict"] = "false";
+    config["mergeAdjacentPathSegments"] = "false";
+    config["mergeRepeatedPathSequences"] = "false";
     config["realTimePreview"] = "true";
     config["execParallel"] = "2";
     config["execVerify"] = "true";
@@ -2213,6 +2363,10 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["preferExifOnFilenameConflict"] =
         GetConfigBool(config, "preferExifOnFilenameConflict", false) ? "true" : "false";
+    config["mergeAdjacentPathSegments"] =
+        GetConfigBool(config, "mergeAdjacentPathSegments", false) ? "true" : "false";
+    config["mergeRepeatedPathSequences"] =
+        GetConfigBool(config, "mergeRepeatedPathSequences", false) ? "true" : "false";
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
     config["execParallel"] = NormalizeParallelCount(GetConfigInt(config, "execParallel", 2)).ToString(CultureInfo.InvariantCulture);
     config["execVerify"] = GetConfigBool(config, "execVerify", true) ? "true" : "false";

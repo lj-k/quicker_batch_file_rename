@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.15
+// 版本：0.06.16
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.15
+// 版本：0.06.16
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -47,6 +47,7 @@ public static readonly string[] PresetConfigKeys = new string[] {
     "filterExtensions", "filterMode",
     "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
     "preferExifOnFilenameConflict",
+    "mergeAdjacentPathSegments", "mergeRepeatedPathSequences",
     "realTimePreview", "execParallel", "execVerify",
     "checksumAlgorithm", "checksumDigits", "checksumPrefix", "checksumSuffix",
     "template"
@@ -1867,6 +1868,16 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     string missingDateText, string baseName, string extension, string checksumBadge,
     IDictionary<string, string> values, out string targetPath, out string error)
 {
+    return TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
+        baseName, extension, checksumBadge, values, false, false, out targetPath, out error);
+}
+
+// 带路径合并选项的重载：合并只作用于模板生成的相对部分，不修改根路径本身。
+public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime? effectiveDate,
+    string missingDateText, string baseName, string extension, string checksumBadge,
+    IDictionary<string, string> values, bool mergeAdjacentSegments, bool mergeRepeatedSequences,
+    out string targetPath, out string error)
+{
     targetPath = null;
     error = null;
 
@@ -1913,7 +1924,8 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     values["【校验码】"] = checksumBadge == null ? "" : checksumBadge;
 
     string rendered = RenderTemplate(template, values);
-    string normalized = NormalizeTargetPath(rendered, rootDirectory, out error);
+    string normalized = NormalizeTargetPath(rendered, rootDirectory,
+        mergeAdjacentSegments, mergeRepeatedSequences, out error);
     if (normalized == null)
         return false;
 
@@ -1926,6 +1938,12 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
 
 public static string NormalizeTargetPath(string renderedPath, string rootDirectory, out string error)
 {
+    return NormalizeTargetPath(renderedPath, rootDirectory, false, false, out error);
+}
+
+public static string NormalizeTargetPath(string renderedPath, string rootDirectory,
+    bool mergeAdjacentSegments, bool mergeRepeatedSequences, out string error)
+{
     error = null;
     if (renderedPath == null)
     {
@@ -1935,6 +1953,7 @@ public static string NormalizeTargetPath(string renderedPath, string rootDirecto
 
     string path = renderedPath.Replace('/', '\\');
     path = CollapseBackslashes(path);
+    bool merge = mergeAdjacentSegments || mergeRepeatedSequences;
 
     bool rooted = IsRootedWindowsPath(path);
     if (!rooted)
@@ -1944,12 +1963,141 @@ public static string NormalizeTargetPath(string renderedPath, string rootDirecto
             error = "模板未包含【根路径】且根路径为空";
             return null;
         }
+        string relative = path.TrimStart('\\');
+        if (merge)
+            relative = MergeTargetPathSegments(relative, mergeAdjacentSegments, mergeRepeatedSequences);
         string root = CollapseBackslashes(rootDirectory.Replace('/', '\\')).TrimEnd('\\');
-        path = root + "\\" + path.TrimStart('\\');
+        path = root + "\\" + relative;
         path = CollapseBackslashes(path);
+    }
+    else if (merge)
+    {
+        path = MergeTargetPathSegments(path, mergeAdjacentSegments, mergeRepeatedSequences);
     }
 
     return path;
+}
+
+// 合并路径中连续重复的文件夹段；最后一段视为文件名，不参与合并。
+public static string MergeTargetPathSegments(string path, bool mergeAdjacentSegments,
+    bool mergeRepeatedSequences)
+{
+    if (path == null || path.Length == 0 ||
+        (!mergeAdjacentSegments && !mergeRepeatedSequences))
+        return path;
+
+    string prefix;
+    List<string> parts;
+    if (!TrySplitPathForMerge(path, out prefix, out parts) || parts.Count < 2)
+        return path;
+
+    List<string> dirs = new List<string>();
+    for (int i = 0; i < parts.Count - 1; i++)
+        dirs.Add(parts[i]);
+
+    bool changed;
+    do
+    {
+        changed = false;
+        if (mergeRepeatedSequences)
+        {
+            while (CollapseOneRepeatedSequence(dirs))
+                changed = true;
+        }
+        if (mergeAdjacentSegments)
+        {
+            while (CollapseOneAdjacentDuplicate(dirs))
+                changed = true;
+        }
+    }
+    while (changed);
+
+    StringBuilder builder = new StringBuilder();
+    builder.Append(prefix);
+    for (int i = 0; i < dirs.Count; i++)
+    {
+        if (i > 0)
+            builder.Append('\\');
+        builder.Append(dirs[i]);
+    }
+    if (dirs.Count > 0)
+        builder.Append('\\');
+    builder.Append(parts[parts.Count - 1]);
+    return builder.ToString();
+}
+
+// 拆分盘符/UNC 前缀与剩余路径段；无法识别标准根时返回 false，保持原路径不变。
+private static bool TrySplitPathForMerge(string path, out string prefix, out List<string> parts)
+{
+    prefix = "";
+    parts = new List<string>();
+    if (path == null || path.Length == 0)
+        return false;
+
+    string[] raw = path.Split('\\');
+    int start = 0;
+    if (IsRootedWindowsPath(path))
+    {
+        if (path.Length >= 3 && IsAsciiDriveLetter(path[0]) && path[1] == ':' && path[2] == '\\')
+        {
+            prefix = raw[0] + "\\";
+            start = 1;
+        }
+        else if (path.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            if (raw.Length < 4 || raw[2].Length == 0 || raw[3].Length == 0)
+                return false;
+            prefix = "\\\\" + raw[2] + "\\" + raw[3] + "\\";
+            start = 4;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    for (int i = start; i < raw.Length; i++)
+        parts.Add(raw[i]);
+    return parts.Count > 0;
+}
+
+// 合并最长的连续重复多级块（至少2段），每次删除后一块，直到没有重复。
+private static bool CollapseOneRepeatedSequence(List<string> dirs)
+{
+    int maxLength = dirs.Count / 2;
+    for (int length = maxLength; length >= 2; length--)
+    {
+        for (int start = 0; start + length * 2 <= dirs.Count; start++)
+        {
+            if (!PathBlocksEqual(dirs, start, start + length, length))
+                continue;
+            dirs.RemoveRange(start + length, length);
+            return true;
+        }
+    }
+    return false;
+}
+
+private static bool CollapseOneAdjacentDuplicate(List<string> dirs)
+{
+    for (int i = 0; i + 1 < dirs.Count; i++)
+    {
+        if (!string.Equals(dirs[i], dirs[i + 1], StringComparison.OrdinalIgnoreCase))
+            continue;
+        dirs.RemoveAt(i + 1);
+        return true;
+    }
+    return false;
+}
+
+private static bool PathBlocksEqual(List<string> dirs, int left, int right, int length)
+{
+    for (int i = 0; i < length; i++)
+    {
+        if (!string.Equals(dirs[left + i], dirs[right + i], StringComparison.OrdinalIgnoreCase))
+            return false;
+    }
+    return true;
 }
 
 private static string CollapseBackslashes(string path)
@@ -2149,6 +2297,8 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
     config["dateFallbackCustomText"] = "";
     config["preferExifOnFilenameConflict"] = "false";
+    config["mergeAdjacentPathSegments"] = "false";
+    config["mergeRepeatedPathSequences"] = "false";
     config["realTimePreview"] = "true";
     config["execParallel"] = "2";
     config["execVerify"] = "true";
@@ -2233,6 +2383,10 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["preferExifOnFilenameConflict"] =
         GetConfigBool(config, "preferExifOnFilenameConflict", false) ? "true" : "false";
+    config["mergeAdjacentPathSegments"] =
+        GetConfigBool(config, "mergeAdjacentPathSegments", false) ? "true" : "false";
+    config["mergeRepeatedPathSequences"] =
+        GetConfigBool(config, "mergeRepeatedPathSequences", false) ? "true" : "false";
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
     config["execParallel"] = NormalizeParallelCount(GetConfigInt(config, "execParallel", 2)).ToString(CultureInfo.InvariantCulture);
     config["execVerify"] = GetConfigBool(config, "execVerify", true) ? "true" : "false";
@@ -2827,7 +2981,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.15
+// 版本：0.06.16
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2850,12 +3004,13 @@ private static ComboBox _rootModeCombo;
 private static ComboBox _startYearCombo;
 private static ComboBox _dateSourceCombo;
 private static CheckBox _preferExifCheck;
+private static CheckBox _mergeAdjacentCheck;
+private static CheckBox _mergeRepeatedCheck;
 private static ComboBox _algorithmCombo;
 private static TextBlock _checksumBadge;
 private static TextBlock _statusText;
 private static TextBlock _perfText;
 private static TextBox _gridFilterText;
-private static ComboBox _gridStatusFilterCombo;
 private static TextBlock _gridFilterCountText;
 private static Popup _headerFilterPopup;
 private static TextBlock _headerFilterTitle;
@@ -2893,7 +3048,7 @@ private static Popup _presetPopup;
 private static ListBox _presetListBox;
 private static Button _loadPresetButton;
 private static Button _savePresetButton;
-private static ScrollViewer _configPanel;
+private static Grid _configPanel;
 private static ComboBox _execParallelCombo;
 private static CheckBox _execVerifyCheck;
 private static Button _executeButton;
@@ -3010,6 +3165,8 @@ private sealed class LayoutContext
     public bool TemplateValid;
     public string BadToken;
     public bool NeedsHash;
+    public bool MergeAdjacentSegments;
+    public bool MergeRepeatedSequences;
     public string Algorithm;
     public int Digits;
     public string Prefix;
@@ -3079,8 +3236,6 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
     AttachToolTips();
 
     _grid.ItemsSource = _rows;
-    if (_gridStatusFilterCombo != null && _gridStatusFilterCombo.Items.Count > 0)
-        _gridStatusFilterCombo.SelectedIndex = 0;
     ApplyGridFilter();
 
     CollectInputPaths();
@@ -3113,12 +3268,13 @@ private static void FindControls(Window win)
     _startYearCombo = (ComboBox)win.FindName("StartYearCombo");
     _dateSourceCombo = (ComboBox)win.FindName("DateSourceCombo");
     _preferExifCheck = (CheckBox)win.FindName("PreferExifCheck");
+    _mergeAdjacentCheck = (CheckBox)win.FindName("MergeAdjacentCheck");
+    _mergeRepeatedCheck = (CheckBox)win.FindName("MergeRepeatedCheck");
     _algorithmCombo = (ComboBox)win.FindName("AlgorithmCombo");
     _checksumBadge = (TextBlock)win.FindName("ChecksumBadge");
     _statusText = (TextBlock)win.FindName("StatusText");
     _perfText = (TextBlock)win.FindName("PerfText");
     _gridFilterText = (TextBox)win.FindName("GridFilterText");
-    _gridStatusFilterCombo = (ComboBox)win.FindName("GridStatusFilterCombo");
     _gridFilterCountText = (TextBlock)win.FindName("GridFilterCountText");
     _headerFilterPopup = (Popup)win.FindName("HeaderFilterPopup");
     _headerFilterTitle = (TextBlock)win.FindName("HeaderFilterTitle");
@@ -3147,7 +3303,7 @@ private static void FindControls(Window win)
     _presetListBox = (ListBox)win.FindName("PresetListBox");
     _loadPresetButton = (Button)win.FindName("BtnLoadPreset");
     _savePresetButton = (Button)win.FindName("BtnSavePreset");
-    _configPanel = (ScrollViewer)win.FindName("ConfigPanel");
+    _configPanel = (Grid)win.FindName("ConfigPanel");
     _execParallelCombo = (ComboBox)win.FindName("ExecParallelCombo");
     _execVerifyCheck = (CheckBox)win.FindName("ExecVerifyCheck");
     _executeButton = (Button)win.FindName("BtnExecute");
@@ -3248,6 +3404,16 @@ private static void AttachEvents(Window win)
     _dateSourceCombo.SelectionChanged += DateSourceCombo_SelectionChanged;
     _preferExifCheck.Checked += PreferExifCheck_Changed;
     _preferExifCheck.Unchecked += PreferExifCheck_Changed;
+    if (_mergeAdjacentCheck != null)
+    {
+        _mergeAdjacentCheck.Checked += MergePathCheck_Changed;
+        _mergeAdjacentCheck.Unchecked += MergePathCheck_Changed;
+    }
+    if (_mergeRepeatedCheck != null)
+    {
+        _mergeRepeatedCheck.Checked += MergePathCheck_Changed;
+        _mergeRepeatedCheck.Unchecked += MergePathCheck_Changed;
+    }
     _algorithmCombo.SelectionChanged += AlgorithmCombo_SelectionChanged;
     _realTimeCheck.Checked += RealTimeCheck_Changed;
     _realTimeCheck.Unchecked += RealTimeCheck_Changed;
@@ -3281,8 +3447,6 @@ private static void AttachEvents(Window win)
     _browseRootButton.Click += BrowseRootButton_Click;
     if (_gridFilterText != null)
         _gridFilterText.TextChanged += delegate { RestartGridFilterTimer(); };
-    if (_gridStatusFilterCombo != null)
-        _gridStatusFilterCombo.SelectionChanged += delegate { ApplyGridFilter(); };
     if (_grid != null)
     {
         _grid.Sorting += PreviewGrid_Sorting;
@@ -3296,6 +3460,11 @@ private static void AttachEvents(Window win)
         _btnHeaderFilterClear.Click += HeaderFilterClear_Click;
     if (_headerFilterTextBox != null)
         _headerFilterTextBox.KeyDown += HeaderFilterTextBox_KeyDown;
+    if (_headerFilterPopup != null && _headerFilterPopup.Child is FrameworkElement)
+        ((FrameworkElement)_headerFilterPopup.Child).KeyDown += HeaderFilterPopup_KeyDown;
+
+    win.PreviewMouseLeftButtonDown += Window_PreviewMouseDown;
+    win.Deactivated += Window_Deactivated;
 
     AttachClick("BtnTokenYyyy", TokenButton_Click);
     AttachClick("BtnTokenMm", TokenButton_Click);
@@ -3335,6 +3504,8 @@ private static void AttachToolTips()
     SetTip(_startYearCombo, "文件名日期允许的最早起始年份，默认2000。\n修改后会重新提取所有文件的【文件名中的日期】，并刷新目标路径预览。");
     SetTip(_dateSourceCombo, "主选日期来源，默认“文件名中的日期”。\n该日期用于【日期yyyy】【日期mm】【日期dd】。\n主选缺失时按递补1→5依次处理。");
     SetTip(_preferExifCheck, "文件名日期与EXIF拍摄日期都可用、但日历日期不同时，输出EXIF拍摄日期。\n用于避免文件名中的日期识别错误；只有文件名日期参与生效日期时才覆盖。\n默认关闭；开启后会立即刷新预览。");
+    SetTip(_mergeAdjacentCheck, "自动合并相邻路径：目标路径中出现连续两层同名文件夹时合并为一层。\n例如 aaa/fff/fff/ccc → aaa/fff/ccc。\n只处理模板生成的路径部分，不修改根路径本身的文件夹。\n默认关闭；开启后会立即刷新预览。");
+    SetTip(_mergeRepeatedCheck, "自动合并多级路径：目标路径中出现连续重复的多级文件夹序列时合并为一个。\n例如 aaa/bbb/fff/bbb/fff/ccc → aaa/bbb/fff/ccc。\n只处理模板生成的路径部分，不修改根路径本身。\n可与“自动合并相邻重复文件夹”同时启用。");
     SetTip(_filterExtensionsText, "过滤器扩展名列表。\n支持分号、逗号、空格、换行分隔；可写 jpg 或 .jpg。\n空列表表示不过滤。\n决策模式为跳过时作为排除名单；为复制/移动/重命名时作为白名单。");
     SetTip(_filterModeCombo, "过滤器决策模式。\n跳过：命中扩展名的文件跳过，其余文件按模板执行（同目录为重命名，跨目录为复制）。\n复制/移动/重命名：仅命中扩展名的文件按该动作执行，其余文件跳过；空列表表示不过滤。\n重命名模式下若模板加入中间文件夹，动作会自动变为复制。");
     SetTip(_loadExtPresetButton, "从动作词典【扩展名预设】载入扩展名列表。\n选择预设后可覆盖当前列表或追加到当前列表。");
@@ -3349,7 +3520,7 @@ private static void AttachToolTips()
     SetTipByName("RootCardTitle", "根路径：决定目标路径的根目录。\n当前文件夹=每个源文件所在目录；其他文件夹=统一目录。\n后果：统一目录可能让不同来源的同名文件产生重名。");
     SetTipByName("DateCardTitle", "日期：选择主日期来源，并配置递补1→5。\n递补可依次尝试其他日期、空值、自定义字符串；选择跳过时该文件不处理、不输出。\n空值下三个日期胶囊都为空。");
     SetTipByName("ChecksumCardTitle", "校验码：算法、位数、前后缀。\n位数取高位；默认前缀[、后缀]；模板不含【校验码】时不计算哈希。\n大文件/BLAKE3计算需要时间。");
-    SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
+    SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n两个合并开关可压缩模板产生的重复文件夹层级，不修改根路径本身。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
     SetTip(_realTimeCheck, "实时刷新开关。\n开启：配置变更后立即重算目标路径（文本输入约250ms防抖）。\n关闭：配置变更只更新配置/日期数据，目标路径保持旧值；需点击【预览】刷新，预览过期时【生成输出】禁用。");
     SetTip(_previewButton, "按当前配置重新计算目标路径，并启动必要的校验码计算。\n用于实时刷新关闭后的手动刷新，也可主动重新预览。");
     SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n每项右侧的🖊用于重命名该预设，❌用于删除该预设；删除不可撤销。\n若词典是旧版单预设，会显示为“默认”。");
@@ -3446,9 +3617,6 @@ private static bool IsGridFilterActive()
     if (_gridFilterText != null && _gridFilterText.Text != null &&
         _gridFilterText.Text.Trim().Length > 0)
         return true;
-    string tag = GetComboTag(_gridStatusFilterCombo);
-    if (tag != null && tag.Length > 0 && tag != "all")
-        return true;
     return _columnFilters.Count > 0;
 }
 
@@ -3457,13 +3625,6 @@ private static bool GridRowFilter(object value)
     Dictionary<string, object> item = value as Dictionary<string, object>;
     if (item == null)
         return false;
-
-    string statusTag = GetComboTag(_gridStatusFilterCombo);
-    if (statusTag != null && statusTag.Length > 0 && statusTag != "all")
-    {
-        if (GetRowFilterState(item) != statusTag)
-            return false;
-    }
 
     // 表头逐列筛选：所有条件同时满足才显示。
     if (_columnFilters.Count > 0)
@@ -3496,22 +3657,6 @@ private static bool ContainsText(Dictionary<string, object> item, string key, st
         return false;
     string content = Convert.ToString(value, CultureInfo.InvariantCulture);
     return content != null && content.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
-}
-
-private static string GetRowFilterState(Dictionary<string, object> item)
-{
-    string execState = Convert.ToString(item["ExecState"], CultureInfo.InvariantCulture);
-    if (execState == "done")
-        return "done";
-    if (execState == "error")
-        return "execerror";
-    if (GetBool(item, "HasError"))
-        return "error";
-    if (GetBool(item, "IsSkipped"))
-        return "skipped";
-    if (GetBool(item, "IsPending"))
-        return "pending";
-    return "ready";
 }
 
 private static void UpdateGridFilterCount()
@@ -3662,13 +3807,30 @@ private static void CloseHeaderFilterPopup()
         _headerFilterPopup.IsOpen = false;
 }
 
+private static void Window_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+{
+    CloseHeaderFilterPopup();
+}
+
+private static void Window_Deactivated(object sender, EventArgs e)
+{
+    CloseHeaderFilterPopup();
+}
+
+private static void HeaderFilterPopup_KeyDown(object sender, KeyEventArgs e)
+{
+    if (e.Key != Key.Escape)
+        return;
+    CloseHeaderFilterPopup();
+    e.Handled = true;
+}
+
 private static string GetColumnFilterLabel(string key)
 {
     if (key == "Action") return "动作";
     if (key == "StatusDisplay") return "状态";
     if (key == "SourcePath") return "源路径名";
     if (key == "TargetPath") return "目标路径名/文件名";
-    if (key == "ExecDetails") return "执行结果";
     return key;
 }
 
@@ -3776,6 +3938,10 @@ private static void SyncUiFromConfig()
     SelectStartYear(GetConfigInt(_config, "startYear", 2000));
     SelectComboByTag(_dateSourceCombo, _config["dateSource"]);
     _preferExifCheck.IsChecked = GetConfigBool(_config, "preferExifOnFilenameConflict", false);
+    if (_mergeAdjacentCheck != null)
+        _mergeAdjacentCheck.IsChecked = GetConfigBool(_config, "mergeAdjacentPathSegments", false);
+    if (_mergeRepeatedCheck != null)
+        _mergeRepeatedCheck.IsChecked = GetConfigBool(_config, "mergeRepeatedPathSequences", false);
     SelectComboByTag(_algorithmCombo, _config["checksumAlgorithm"]);
     _realTimeCheck.IsChecked = GetConfigBool(_config, "realTimePreview", true);
     _filterExtensionsText.Text = _config["filterExtensions"];
@@ -3899,6 +4065,10 @@ private static void ReadConfigFromUi()
     _config["dateFallbackOrder"] = GetFallbackOrderFromUi();
     _config["dateFallbackCustomText"] = _fallbackCustomText.Text == null ? "" : _fallbackCustomText.Text;
     _config["preferExifOnFilenameConflict"] = _preferExifCheck.IsChecked == true ? "true" : "false";
+    _config["mergeAdjacentPathSegments"] =
+        _mergeAdjacentCheck != null && _mergeAdjacentCheck.IsChecked == true ? "true" : "false";
+    _config["mergeRepeatedPathSequences"] =
+        _mergeRepeatedCheck != null && _mergeRepeatedCheck.IsChecked == true ? "true" : "false";
     _config["realTimePreview"] = _realTimeCheck.IsChecked == true ? "true" : "false";
     _config["execParallel"] = GetComboTag(_execParallelCombo) ?? "2";
     _config["execVerify"] = _execVerifyCheck != null && _execVerifyCheck.IsChecked == true ? "true" : "false";
@@ -3984,6 +4154,12 @@ private static void DateSourceCombo_SelectionChanged(object sender, SelectionCha
 }
 
 private static void PreferExifCheck_Changed(object sender, RoutedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ApplyUiConfig();
+}
+
+private static void MergePathCheck_Changed(object sender, RoutedEventArgs e)
 {
     if (_suppressEvents) return;
     ApplyUiConfig();
@@ -4941,6 +5117,8 @@ private static LayoutContext CreateLayoutContext()
     context.TemplateValid = ValidateTemplateTokens(context.Template, out badToken);
     context.BadToken = badToken;
     context.NeedsHash = TemplateNeedsHash(context.Template);
+    context.MergeAdjacentSegments = GetConfigBool(_config, "mergeAdjacentPathSegments", false);
+    context.MergeRepeatedSequences = GetConfigBool(_config, "mergeRepeatedPathSequences", false);
     context.Algorithm = _config["checksumAlgorithm"];
     context.Digits = GetConfigInt(_config, "checksumDigits", 8);
     context.Prefix = _config["checksumPrefix"];
@@ -5076,7 +5254,8 @@ private static RowLayout ComputeLayout(Dictionary<string, object> item, LayoutCo
     string target;
     string error;
     bool ok = TryBuildTargetPath(context.Template, rootDirectory, effectiveDate, missingDateText,
-        baseName, extension, checksum, values, out target, out error);
+        baseName, extension, checksum, values, context.MergeAdjacentSegments,
+        context.MergeRepeatedSequences, out target, out error);
     if (!ok)
     {
         SetLayoutError(layout, error == null ? "无法生成目标路径" : error, "路径错误");
@@ -5319,7 +5498,6 @@ private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
         item["Action"] = layout == null || layout.Action == null ? "" : layout.Action;
         item["Status"] = layout == null || layout.Status == null ? "" : layout.Status;
         item["Error"] = layout == null || layout.Error == null ? "" : layout.Error;
-        UpdateStatusDisplay(item);
         item["HasError"] = layout != null && layout.HasError;
         item["IsPending"] = layout != null && layout.IsPending;
         item["HashPending"] = layout != null && layout.HashPending;
@@ -5328,6 +5506,7 @@ private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
         item["HashHex"] = layout == null ? null : layout.HashHex;
         item["ExecState"] = "";
         item["ExecDetails"] = "";
+        UpdateStatusDisplay(item);
         RefreshRowDetails(item);
     }
 
@@ -5550,23 +5729,35 @@ private static void SetRowError(Dictionary<string, object> item, string message,
     UpdateStatusDisplay(item);
 }
 
-// 状态列同时显示状态与异常信息，异常为空时只显示状态。
-private static string BuildStatusDisplay(string status, string error)
+// 状态列同时显示状态、执行结果与异常信息；重复文本只显示一次。
+private static string BuildStatusDisplay(string status, string error, string execDetails)
 {
     string statusText = status == null ? "" : status;
     string errorText = error == null ? "" : error;
-    if (errorText.Length == 0)
+    string execText = execDetails == null ? "" : execDetails;
+
+    string detail;
+    if (execText.Length == 0)
+        detail = errorText;
+    else if (errorText.Length == 0 ||
+        string.Equals(errorText, execText, StringComparison.OrdinalIgnoreCase))
+        detail = execText;
+    else
+        detail = execText + "；" + errorText;
+
+    if (detail.Length == 0)
         return statusText;
     if (statusText.Length == 0)
-        return errorText;
-    return statusText + "：" + errorText;
+        return detail;
+    return statusText + "：" + detail;
 }
 
 private static void UpdateStatusDisplay(Dictionary<string, object> item)
 {
     item["StatusDisplay"] = BuildStatusDisplay(
         Convert.ToString(item["Status"], CultureInfo.InvariantCulture),
-        Convert.ToString(item["Error"], CultureInfo.InvariantCulture));
+        Convert.ToString(item["Error"], CultureInfo.InvariantCulture),
+        Convert.ToString(item["ExecDetails"], CultureInfo.InvariantCulture));
 }
 
 private static bool GetBool(Dictionary<string, object> item, string key)
@@ -6979,6 +7170,7 @@ private static void Execute_Click(object sender, RoutedEventArgs e)
     {
         queue[i]["ExecState"] = "";
         queue[i]["ExecDetails"] = "";
+        UpdateStatusDisplay(queue[i]);
     }
 
     // 执行前先写出非跳过列表与动作，窗口中途关闭时数据映射仍有有效输出。
@@ -7759,12 +7951,14 @@ private static void Window_Closed(object sender, EventArgs e)
     _rootModeCombo = null;
     _startYearCombo = null;
     _dateSourceCombo = null;
+    _preferExifCheck = null;
+    _mergeAdjacentCheck = null;
+    _mergeRepeatedCheck = null;
     _algorithmCombo = null;
     _checksumBadge = null;
     _statusText = null;
     _perfText = null;
     _gridFilterText = null;
-    _gridStatusFilterCombo = null;
     _gridFilterCountText = null;
     _headerFilterPopup = null;
     _headerFilterTitle = null;

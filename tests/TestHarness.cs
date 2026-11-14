@@ -229,6 +229,27 @@ public static class TestHarness
         normalized = CoreUnderTest.NormalizeTargetPath("B/C.TXT", @"C:\A", out error);
         CheckEqual(@"C:\A\B\C.TXT", normalized, "path: combine root");
 
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\fff\fff\ccc.txt", "", false, false, out error);
+        CheckEqual(@"C:\A\fff\fff\ccc.txt", normalized, "merge: both options off leaves duplicates");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\fff\fff\ccc.txt", "", true, false, out error);
+        CheckEqual(@"C:\A\fff\ccc.txt", normalized, "merge: adjacent duplicate folder");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\bbb\fff\bbb\fff\ccc.txt", "", false, true, out error);
+        CheckEqual(@"C:\A\bbb\fff\ccc.txt", normalized, "merge: repeated two-level sequence");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\bbb\fff\bbb\fff\ccc.txt", "", true, false, out error);
+        CheckEqual(@"C:\A\bbb\fff\bbb\fff\ccc.txt", normalized, "merge: adjacent option keeps multi-level");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\aaa\bbb\ccc\aaa\bbb\ccc\ddd.txt", "", false, true, out error);
+        CheckEqual(@"C:\A\aaa\bbb\ccc\ddd.txt", normalized, "merge: repeated three-level sequence");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"C:\A\fff\fff\bbb\ccc\bbb\ccc\ddd.txt", "", true, true, out error);
+        CheckEqual(@"C:\A\fff\bbb\ccc\ddd.txt", normalized, "merge: both options combined");
+        normalized = CoreUnderTest.NormalizeTargetPath(@"\\server\share\fff\fff\ccc.txt", "", true, false, out error);
+        CheckEqual(@"\\server\share\fff\ccc.txt", normalized, "merge: UNC prefix preserved");
+        normalized = CoreUnderTest.NormalizeTargetPath("fff/fff/ccc.txt", @"C:\Root", true, false, out error);
+        CheckEqual(@"C:\Root\fff\ccc.txt", normalized, "merge: relative template merges under root");
+
+        ok = CoreUnderTest.TryBuildTargetPath("【根路径】/fff/fff/ccc/【源文件名】.【扩展名】", @"C:\A",
+            new DateTime(2020, 6, 15), null, "D", "TXT", "", null, true, false, out target, out error);
+        Check(ok && target == @"C:\A\fff\ccc\D.TXT", "path: merge option wired into build");
+
         Check(CoreUnderTest.ValidateCrossPlatformPath(@"C:\A\B.TXT", out error), "validate: normal drive path");
         Check(CoreUnderTest.ValidateCrossPlatformPath(@"\\server\share\B.TXT", out error), "validate: UNC path");
         Check(!CoreUnderTest.ValidateCrossPlatformPath(@"\\server\share", out error), "validate: UNC without file");
@@ -554,6 +575,8 @@ public static class TestHarness
         config["dateFallbackOrder"] = "exif,created,custom,empty,skip";
         config["dateFallbackCustomText"] = "兜底日期";
         config["preferExifOnFilenameConflict"] = "true";
+        config["mergeAdjacentPathSegments"] = "true";
+        config["mergeRepeatedPathSequences"] = "true";
         config["realTimePreview"] = "false";
         config["execParallel"] = "5";
         config["execVerify"] = "false";
@@ -572,6 +595,8 @@ public static class TestHarness
         Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,custom,empty,skip", "preset: fallback order");
         Check(Convert.ToString(preset["dateFallbackCustomText"]) == "兜底日期", "preset: fallback custom text");
         Check(Convert.ToString(preset["preferExifOnFilenameConflict"]) == "true", "preset: prefer exif flag");
+        Check(Convert.ToString(preset["mergeAdjacentPathSegments"]) == "true", "preset: merge adjacent flag");
+        Check(Convert.ToString(preset["mergeRepeatedPathSequences"]) == "true", "preset: merge repeated flag");
         Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
         Check(Convert.ToString(preset["execParallel"]) == "5", "preset: exec parallel");
         Check(Convert.ToString(preset["execVerify"]) == "false", "preset: exec verify");
@@ -587,6 +612,8 @@ public static class TestHarness
         CheckEqual("exif,created,custom,empty,skip", loaded["dateFallbackOrder"], "preset: order roundtrip");
         CheckEqual("兜底日期", loaded["dateFallbackCustomText"], "preset: fallback custom roundtrip");
         CheckEqual("true", loaded["preferExifOnFilenameConflict"], "preset: prefer exif roundtrip");
+        CheckEqual("true", loaded["mergeAdjacentPathSegments"], "preset: merge adjacent roundtrip");
+        CheckEqual("true", loaded["mergeRepeatedPathSequences"], "preset: merge repeated roundtrip");
         CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
         CheckEqual("5", loaded["execParallel"], "preset: exec parallel roundtrip");
         CheckEqual("false", loaded["execVerify"], "preset: exec verify roundtrip");
