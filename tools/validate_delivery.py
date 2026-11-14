@@ -45,8 +45,9 @@ check(not missing, "all code-referenced names exist in XAML" + ("" if not missin
 required = {
     "RootModeCombo", "RootPathText", "BrowseRootButton", "StartYearCombo", "DateSourceCombo",
     "RealTimeCheck", "BtnPreview", "FallbackEnabledCheck",
-    "Fallback1Combo", "Fallback2Combo", "Fallback3Combo", "Fallback4Combo",
+    "Fallback1Combo", "Fallback2Combo", "Fallback3Combo", "Fallback4Combo", "Fallback5Text",
     "MissingModeCombo", "MissingText", "ErrorBanner", "ErrorBannerText",
+    "PresetPopup", "PresetListBox",
     "AlgorithmCombo", "DigitsText", "PrefixText", "SuffixText", "ChecksumBadge",
     "TemplateEditor", "PreviewGrid", "StatusText", "Progress", "BtnCancel", "BtnApply",
     "BtnLoadPreset", "BtnSavePreset", "BtnResetTemplate",
@@ -66,13 +67,13 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check("// 版本：0.02" in dist_text, "deployed code version is 0.02")
+check("// 版本：0.03" in dist_text, "deployed code version is 0.03")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.02" in core_text, "core source version is 0.02")
-check('preset["presetVersion"] = "0.02"' in core_text, "preset version is 0.02")
-check('// 版本：0.02' in aux_text, "aux source version is 0.02")
-check("XAML 版本：0.02" in xaml_text, "XAML version is 0.02")
+check("// 版本：0.03" in core_text, "core source version is 0.03")
+check('preset["presetVersion"] = "0.03"' in core_text, "preset version is 0.03")
+check('// 版本：0.03' in aux_text, "aux source version is 0.03")
+check("XAML 版本：0.03" in xaml_text, "XAML version is 0.03")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -95,12 +96,12 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check(req_text.count("0.0.3") == 1 and "> 版本：0.0.3" in req_text, "requirements doc version 0.0.3 is unique")
+check(req_text.count("0.0.4") == 1 and "> 版本：0.0.4" in req_text, "requirements doc version 0.0.4 is unique")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 
 for name, version in [
-    ("doc/开发说明.md", "0.02"),
-    ("doc/测试报告.md", "0.02"),
+    ("doc/开发说明.md", "0.03"),
+    ("doc/测试报告.md", "0.03"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -112,7 +113,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.02]" in changelog_text, "CHANGELOG has 0.02 entry")
+    check("[0.03]" in changelog_text, "CHANGELOG has 0.03 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -121,7 +122,7 @@ check("版本：0.01" in agents, "AGENTS.md has version 0.01")
 check("所有的用户输入完整记录在userinput文件夹" in agents, "AGENTS.md keeps user rule")
 
 inputs = sorted((ROOT / "userinput").glob("*.md"))
-check(len(inputs) >= 4, "userinput contains at least 4 records")
+check(len(inputs) >= 5, "userinput contains at least 5 records")
 
 for note in notes:
     print(note)

@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.02
+// 版本：0.03
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -1002,6 +1002,7 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateSource"] = "filename";
     config["dateFallbackEnabled"] = "true";
     config["dateFallbackOrder"] = NormalizeFallbackOrder(null);
+    config["dateFallback5Text"] = "";
     config["dateMissingMode"] = "empty";
     config["dateMissingText"] = "";
     config["realTimePreview"] = "true";
@@ -1069,6 +1070,7 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["dateSource"] = NormalizeDateSource(GetConfigString(config, "dateSource", "filename"));
     config["dateFallbackEnabled"] = GetConfigBool(config, "dateFallbackEnabled", true) ? "true" : "false";
     config["dateFallbackOrder"] = NormalizeFallbackOrder(GetConfigString(config, "dateFallbackOrder", ""));
+    config["dateFallback5Text"] = GetConfigString(config, "dateFallback5Text", "");
     string missingMode = (GetConfigString(config, "dateMissingMode", "empty") ?? "").Trim().ToLowerInvariant();
     config["dateMissingMode"] = missingMode == "custom" ? "custom" : "empty";
     config["dateMissingText"] = GetConfigString(config, "dateMissingText", "");
@@ -1101,13 +1103,14 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.02";
+    preset["presetVersion"] = "0.03";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
     preset["dateSource"] = normalized["dateSource"];
     preset["dateFallbackEnabled"] = normalized["dateFallbackEnabled"];
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
+    preset["dateFallback5Text"] = normalized["dateFallback5Text"];
     preset["dateMissingMode"] = normalized["dateMissingMode"];
     preset["dateMissingText"] = normalized["dateMissingText"];
     preset["realTimePreview"] = normalized["realTimePreview"];
@@ -1127,7 +1130,8 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
     bool applied = false;
     string[] keys = new string[] {
         "rootMode", "rootPath", "startYear", "dateSource",
-        "dateFallbackEnabled", "dateFallbackOrder", "dateMissingMode", "dateMissingText",
+        "dateFallbackEnabled", "dateFallbackOrder", "dateFallback5Text",
+        "dateMissingMode", "dateMissingText",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
         "checksumPrefix", "checksumSuffix", "template"
     };

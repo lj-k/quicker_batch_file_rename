@@ -181,6 +181,10 @@ public static class TestHarness
             null, "", "D", "TXT", "", out target, out error);
         Check(ok && target == @"C:\A\D.TXT", "path: missing date empty text is allowed");
 
+        ok = CoreUnderTest.TryBuildTargetPath("【根路径】/【日期yyyy】【日期mm】【日期dd】/【源文件名】.【扩展名】", @"C:\A",
+            null, "", "D", "TXT", "", out target, out error);
+        Check(ok && target == @"C:\A\D.TXT", "path: all empty date tokens collapse to empty");
+
         string normalized = CoreUnderTest.NormalizeTargetPath("C://A/B//C", "", out error);
         CheckEqual(@"C:\A\B\C", normalized, "path: collapse duplicate separators");
         normalized = CoreUnderTest.NormalizeTargetPath(@"\\server\share\\folder", "", out error);
@@ -278,6 +282,7 @@ public static class TestHarness
         config["dateSource"] = "exif";
         config["dateFallbackEnabled"] = "false";
         config["dateFallbackOrder"] = "exif,created";
+        config["dateFallback5Text"] = "兜底日期";
         config["dateMissingMode"] = "custom";
         config["dateMissingText"] = "未知日期";
         config["realTimePreview"] = "false";
@@ -288,11 +293,12 @@ public static class TestHarness
         config["template"] = "【根路径】/X-【校验码】.【扩展名】";
 
         Dictionary<string, object> preset = CoreUnderTest.BuildPresetDictionary(config);
-        Check(Convert.ToString(preset["presetVersion"]) == "0.02", "preset: version");
+        Check(Convert.ToString(preset["presetVersion"]) == "0.03", "preset: version");
         Check(Convert.ToString(preset["rootMode"]) == "custom", "preset: root mode");
         Check(Convert.ToString(preset["checksumDigits"]) == "16", "preset: digits");
         Check(Convert.ToString(preset["dateFallbackEnabled"]) == "false", "preset: fallback flag");
         Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,filename,modified", "preset: fallback order");
+        Check(Convert.ToString(preset["dateFallback5Text"]) == "兜底日期", "preset: fallback5 text");
         Check(Convert.ToString(preset["dateMissingMode"]) == "custom", "preset: missing mode");
         Check(Convert.ToString(preset["dateMissingText"]) == "未知日期", "preset: missing text");
         Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
@@ -305,6 +311,7 @@ public static class TestHarness
         CheckEqual("exif", loaded["dateSource"], "preset: date source");
         CheckEqual("false", loaded["dateFallbackEnabled"], "preset: fallback roundtrip");
         CheckEqual("exif,created,filename,modified", loaded["dateFallbackOrder"], "preset: order roundtrip");
+        CheckEqual("兜底日期", loaded["dateFallback5Text"], "preset: fallback5 roundtrip");
         CheckEqual("custom", loaded["dateMissingMode"], "preset: missing mode roundtrip");
         CheckEqual("未知日期", loaded["dateMissingText"], "preset: missing text roundtrip");
         CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
@@ -319,6 +326,7 @@ public static class TestHarness
         CheckEqual("]", defaults["checksumSuffix"], "preset: default suffix is ]");
         CheckEqual("true", defaults["dateFallbackEnabled"], "preset: default fallback enabled");
         CheckEqual("filename,exif,modified,created", defaults["dateFallbackOrder"], "preset: default fallback order");
+        CheckEqual("", defaults["dateFallback5Text"], "preset: default fallback5 empty");
         CheckEqual("empty", defaults["dateMissingMode"], "preset: default missing mode");
         CheckEqual("true", defaults["realTimePreview"], "preset: default realtime");
 
