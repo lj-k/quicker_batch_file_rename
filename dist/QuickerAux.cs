@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.04
+// 版本：0.05
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
@@ -28,13 +29,14 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.04
+// 版本：0.05
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
 // ============================================================================
 
 public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】";
+public const string RenameDefaultTemplate = "【根路径】/【源文件名】-【校验码】.【扩展名】";
 
 public static readonly string[] SupportedAlgorithms = new string[] { "CRC32", "BLAKE3", "MD5", "SHA-256" };
 public static readonly string[] SupportedDateSources = new string[] { "filename", "exif", "modified", "created" };
@@ -260,32 +262,78 @@ public static string NormalizeExtensionList(string value)
 public static string NormalizeFilterMode(string mode)
 {
     string value = (mode == null ? "" : mode.Trim()).ToLowerInvariant();
+    if (value == "copy" || value == "复制")
+        return "copy";
+    if (value == "move" || value == "移动")
+        return "move";
+    if (value == "rename" || value == "重命名")
+        return "rename";
+    // 旧版 execute/执行/白名单表示按模板处理，迁移为 rename；目标目录变化时动作会自动变为复制。
     if (value == "execute" || value == "执行" || value == "白名单" || value == "include")
-        return "execute";
+        return "rename";
     return "skip";
+}
+
+public static string GetDefaultTemplateForMode(string mode)
+{
+    return NormalizeFilterMode(mode) == "rename" ? RenameDefaultTemplate : DefaultTemplate;
+}
+
+/// <summary>
+/// 根据决策模式、过滤器命中和目标目录是否变化，决定每个文件在展示界面中的动作。
+/// 跳过模式是黑名单：命中列表的文件跳过，其他文件按模板执行（同目录为重命名，跨目录为复制）。
+/// 复制/移动/重命名模式是白名单：仅命中列表的文件执行，其他文件跳过；空列表表示不过滤。
+/// </summary>
+public static string ResolveAction(string mode, bool extensionMatched, bool hasFilterList, bool sameDirectory)
+{
+    string normalized = NormalizeFilterMode(mode);
+    string fallback = sameDirectory ? "重命名" : "复制";
+
+    if (normalized == "skip")
+    {
+        if (!hasFilterList)
+            return fallback;
+        return extensionMatched ? "跳过" : fallback;
+    }
+
+    if (hasFilterList && !extensionMatched)
+        return "跳过";
+
+    if (normalized == "copy")
+        return "复制";
+    if (normalized == "move")
+        return "移动";
+    return sameDirectory ? "重命名" : "复制";
+}
+
+public static int NormalizeParallelCount(int value)
+{
+    if (value < 1) return 1;
+    if (value > 8) return 8;
+    return value;
 }
 
 public static bool ShouldSkipByFilter(string extension, string extensions, string mode)
 {
     string list = NormalizeExtensionList(extensions);
-    if (list.Length == 0)
+    bool hasFilter = list.Length > 0;
+    bool matched = hasFilter && ExtensionMatchesFilter(extension, list);
+    return ResolveAction(mode, matched, hasFilter, true) == "跳过";
+}
+
+public static bool ExtensionMatchesFilter(string extension, string normalizedExtensions)
+{
+    if (normalizedExtensions == null || normalizedExtensions.Length == 0)
         return false;
 
-    bool match = false;
-    string[] items = list.Split(';');
     string normalized = (extension == null ? "" : extension.Trim().TrimStart('.')).ToLowerInvariant();
+    string[] items = normalizedExtensions.Split(';');
     for (int i = 0; i < items.Length; i++)
     {
         if (items[i] == "*" || items[i] == normalized)
-        {
-            match = true;
-            break;
-        }
+            return true;
     }
-
-    if (NormalizeFilterMode(mode) == "execute")
-        return !match;
-    return match;
+    return false;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -1133,6 +1181,8 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
     config["dateFallbackCustomText"] = "";
     config["realTimePreview"] = "true";
+    config["execParallel"] = "2";
+    config["execVerify"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
     config["checksumPrefix"] = "[";
@@ -1213,6 +1263,8 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     string customText = GetConfigString(config, "dateFallbackCustomText", oldFallback5);
     config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
+    config["execParallel"] = NormalizeParallelCount(GetConfigInt(config, "execParallel", 2)).ToString(CultureInfo.InvariantCulture);
+    config["execVerify"] = GetConfigBool(config, "execVerify", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
     if (!IsSupportedAlgorithm(algorithm))
@@ -1230,9 +1282,9 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "[");
     config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "]");
 
-    string template = GetConfigString(config, "template", DefaultTemplate);
-    if (template == null)
-        template = DefaultTemplate;
+    string template = GetConfigString(config, "template", "");
+    if (template == null || template.Trim().Length == 0)
+        template = GetDefaultTemplateForMode(config["filterMode"]);
     config["template"] = template;
 }
 
@@ -1241,7 +1293,7 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.04";
+    preset["presetVersion"] = "0.05";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
@@ -1251,6 +1303,8 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
     preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
     preset["realTimePreview"] = normalized["realTimePreview"];
+    preset["execParallel"] = normalized["execParallel"];
+    preset["execVerify"] = normalized["execVerify"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
     preset["checksumPrefix"] = normalized["checksumPrefix"];
@@ -1265,12 +1319,14 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
         return false;
 
     bool applied = false;
+    bool templateApplied = false;
     string[] keys = new string[] {
         "rootMode", "rootPath", "startYear",
         "filterExtensions", "filterMode",
         "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
         "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
+        "execParallel", "execVerify",
         "checksumPrefix", "checksumSuffix", "template"
     };
     for (int i = 0; i < keys.Length; i++)
@@ -1280,15 +1336,26 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
             continue;
         config[keys[i]] = Convert.ToString(raw, CultureInfo.InvariantCulture);
         applied = true;
+        if (keys[i] == "template")
+            templateApplied = true;
     }
     if (applied)
+    {
+        if (!templateApplied)
+        {
+            string current = GetConfigString(config, "template", "");
+            if (current == null || current.Length == 0 ||
+                current == DefaultTemplate || current == RenameDefaultTemplate)
+                config["template"] = GetDefaultTemplateForMode(GetConfigString(config, "filterMode", "skip"));
+        }
         NormalizeConfig(config);
+    }
     return applied;
 }
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.04
+// 版本：0.05
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -1330,6 +1397,12 @@ private static Popup _presetPopup;
 private static ListBox _presetListBox;
 private static Button _loadPresetButton;
 private static Button _savePresetButton;
+private static ScrollViewer _configPanel;
+private static ComboBox _execParallelCombo;
+private static CheckBox _execVerifyCheck;
+private static Button _executeButton;
+private static ProgressBar _execProgress;
+private static TextBlock _execStatusText;
 
 private static ObservableCollection<Dictionary<string, object>> _rows =
     new ObservableCollection<Dictionary<string, object>>();
@@ -1358,6 +1431,20 @@ private static volatile int _hashTotal = 0;
 private static volatile int _hashDone = 0;
 private static int _skippedFolders = 0;
 private static int _skippedInvalid = 0;
+
+private static bool _executing = false;
+private static volatile bool _execStop = false;
+private static bool _closeAfterExecution = false;
+private static int _execCursor = 0;
+private static int _execTotal = 0;
+private static int _execDone = 0;
+private static int _execErrors = 0;
+private static int _execWorkers = 0;
+private static long _execBytes = 0;
+private static long _execStartTicks = 0;
+private static List<Dictionary<string, object>> _execQueue = new List<Dictionary<string, object>>();
+private static DispatcherTimer _execTimer = null;
+private static readonly object _execRowLock = new object();
 
 private static readonly string[] ExifExtensions = new string[] {
     ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp", ".gif", ".heic", ".heif", ".webp"
@@ -1389,6 +1476,7 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
         // 取消或直接关闭窗口时，输出为空列表，避免残留上一次的结果。
         dataContext["origPaths"] = new List<object>();
         dataContext["targetPaths"] = new List<object>();
+        dataContext["actions"] = new List<object>();
     }
 }
 
@@ -1463,6 +1551,12 @@ private static void FindControls(Window win)
     _presetListBox = (ListBox)win.FindName("PresetListBox");
     _loadPresetButton = (Button)win.FindName("BtnLoadPreset");
     _savePresetButton = (Button)win.FindName("BtnSavePreset");
+    _configPanel = (ScrollViewer)win.FindName("ConfigPanel");
+    _execParallelCombo = (ComboBox)win.FindName("ExecParallelCombo");
+    _execVerifyCheck = (CheckBox)win.FindName("ExecVerifyCheck");
+    _executeButton = (Button)win.FindName("BtnExecute");
+    _execProgress = (ProgressBar)win.FindName("ExecProgress");
+    _execStatusText = (TextBlock)win.FindName("ExecStatusText");
 }
 
 private static void ResetRuntimeState()
@@ -1487,6 +1581,18 @@ private static void ResetRuntimeState()
     _suppressPresetSelection = false;
     _suppressEvents = false;
     _suppressEditor = false;
+    _executing = false;
+    _execStop = false;
+    _closeAfterExecution = false;
+    _execCursor = 0;
+    _execTotal = 0;
+    _execDone = 0;
+    _execErrors = 0;
+    _execWorkers = 0;
+    _execBytes = 0;
+    _execStartTicks = 0;
+    _execQueue = new List<Dictionary<string, object>>();
+    StopExecutionTimer();
     if (_debounceTimer != null)
     {
         _debounceTimer.Stop();
@@ -1528,6 +1634,13 @@ private static void AttachEvents(Window win)
     _realTimeCheck.Unchecked += RealTimeCheck_Changed;
     _filterExtensionsText.TextChanged += FilterExtensions_TextChanged;
     _filterModeCombo.SelectionChanged += FilterMode_SelectionChanged;
+    if (_execParallelCombo != null)
+        _execParallelCombo.SelectionChanged += ExecSetting_Changed;
+    if (_execVerifyCheck != null)
+    {
+        _execVerifyCheck.Checked += ExecSetting_Changed;
+        _execVerifyCheck.Unchecked += ExecSetting_Changed;
+    }
     _fallback1Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallback2Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallback3Combo.SelectionChanged += FallbackOrder_SelectionChanged;
@@ -1559,8 +1672,10 @@ private static void AttachEvents(Window win)
     AttachClick("BtnPreview", Preview_Click);
     AttachClick("BtnCancel", Cancel_Click);
     AttachClick("BtnApply", Apply_Click);
+    AttachClick("BtnExecute", Execute_Click);
 
     win.Closed += Window_Closed;
+    win.Closing += Window_Closing;
 }
 
 private static void AttachClick(string name, RoutedEventHandler handler)
@@ -1578,8 +1693,8 @@ private static void AttachToolTips()
     SetTip(_browseRootButton, "选择固定根目录。\n选择“其他文件夹”时也会自动弹出此选择器；取消且没有历史目录时会回到“当前文件夹”。");
     SetTip(_startYearCombo, "文件名日期允许的最早起始年份，默认2000。\n修改后会重新提取所有文件的【文件名中的日期】，并刷新目标路径预览。");
     SetTip(_dateSourceCombo, "主选日期来源，默认“文件名中的日期”。\n该日期用于【日期yyyy】【日期mm】【日期dd】。\n主选缺失时按递补1→5依次处理。");
-    SetTip(_filterExtensionsText, "过滤器扩展名列表。\n支持分号、逗号、空格、换行分隔；可写 jpg 或 .jpg。\n空列表表示不过滤。\n匹配后由“决策模式”决定跳过还是执行；被跳过的文件不输出。");
-    SetTip(_filterModeCombo, "过滤器决策模式。\n匹配时跳过：命中扩展名的文件不处理、不输出。\n匹配时执行（白名单）：仅处理命中扩展名的文件，其他文件跳过。");
+    SetTip(_filterExtensionsText, "过滤器扩展名列表。\n支持分号、逗号、空格、换行分隔；可写 jpg 或 .jpg。\n空列表表示不过滤。\n决策模式为跳过时作为排除名单；为复制/移动/重命名时作为白名单。");
+    SetTip(_filterModeCombo, "过滤器决策模式。\n跳过：命中扩展名的文件跳过，其余文件按模板执行（同目录为重命名，跨目录为复制）。\n复制/移动/重命名：仅命中扩展名的文件按该动作执行，其余文件跳过；空列表表示不过滤。\n重命名模式下若模板加入中间文件夹，动作会自动变为复制。");
     SetTip(_loadExtPresetButton, "从动作词典【扩展名预设】载入扩展名列表。\n选择预设后可覆盖当前列表或追加到当前列表。");
     SetTip(_saveExtPresetButton, "把当前扩展名列表保存到动作词典【扩展名预设】。\n会要求输入预设名称；同名时确认覆盖。");
     SetTip(_fallback1Combo, "递补1：日期来源/空值/自定义/跳过。\n按顺序查找；日期来源可用则采用。\n空值=日期胶囊为空；自定义=使用自定义值；跳过=该文件不处理也不输出。");
@@ -1602,10 +1717,13 @@ private static void AttachToolTips()
     SetTip(_prefixText, "校验码前缀，默认“[”。\n直接位于“算法-校验码”左侧，不再额外套固定方括号。");
     SetTip(_suffixText, "校验码后缀，默认“]”。\n直接位于“算法-校验码”右侧。");
     SetTip(_editor, "目标路径模板。\n点击右侧胶囊可在光标位置插入变量。\n【根路径】可与相对子目录组合；也可直接写绝对路径。\n输出统一使用Windows反斜杠；非法字符、保留设备名、超长路径会在顶部报错。");
-    SetTip(_grid, "源路径与目标路径预览。\n鼠标悬浮行可查看四类日期、生效日期、校验码、目标路径和完整错误。\n红底=异常，黄底=校验码计算中。");
+    SetTip(_grid, "源路径、目标路径与动作预览。\n鼠标悬浮行可查看四类日期、生效日期、校验码、目标路径和完整错误。\n红底=异常，黄底=校验码计算中，灰底=跳过，绿底=执行成功。");
     SetTip(_statusText, "状态统计：文件总数、跳过项、就绪/异常/计算中数量与校验码进度。\n实时刷新关闭且配置变更后会提示需要手动预览。");
-    SetTipByName("BtnCancel", "关闭窗口并放弃本次输出。\n两个输出列表保持为空；已通过【保存预设】显式保存的配置仍会写回预设词典。");
+    SetTipByName("BtnCancel", "关闭窗口。\n未执行时：放弃输出，两个输出列表保持为空。\n执行中：询问是否停止；已开始的文件操作会完成，未开始的项目不再执行。");
     SetTip(_applyButton, "生成两个等长、序号配对的输出列表和预设词典。\n存在异常行时需确认，仅输出就绪行；校验码未算完时需等待。");
+    SetTip(_execParallelCombo, "执行并行线程数，1~8。\n数值越大复制/移动越快，但会占用更多磁盘与CPU资源。\n重命名操作本身很快，通常无需高并行。");
+    SetTip(_execVerifyCheck, "执行后校验。\n复制/移动完成后重新计算目标文件校验码，与源文件校验码比较；\n若模板包含【校验码】，还会检查目标文件名中的校验码标记是否一致。\n重命名不执行该校验。大文件会明显增加耗时。");
+    SetTip(_executeButton, "按展示列表的“动作”列执行复制/移动/重命名。\n跳过行、异常行和校验码计算中的行不会执行。\n目标目录不存在时自动创建；目标文件已存在时该项报错，不会覆盖。\n执行期间配置区禁用，可点击取消停止尚未开始的项目。");
 
     SetTip(_presetListBox, "预设下拉列表。\n单击预设名称即可载入其全部配置；点击列表外可关闭。");
 
@@ -1665,6 +1783,9 @@ private static void SyncUiFromConfig()
     _realTimeCheck.IsChecked = GetConfigBool(_config, "realTimePreview", true);
     _filterExtensionsText.Text = _config["filterExtensions"];
     SelectComboByTag(_filterModeCombo, _config["filterMode"]);
+    SelectComboByTag(_execParallelCombo, _config["execParallel"]);
+    if (_execVerifyCheck != null)
+        _execVerifyCheck.IsChecked = GetConfigBool(_config, "execVerify", true);
     SyncFallbackCombosFromConfig();
     _fallbackCustomText.Text = _config["dateFallbackCustomText"];
     _digitsText.Text = _config["checksumDigits"];
@@ -1701,6 +1822,8 @@ private static string GetComboTag(ComboBox combo)
 
 private static void SelectComboByTag(ComboBox combo, string tag)
 {
+    if (combo == null)
+        return;
     foreach (object item in combo.Items)
     {
         ComboBoxItem comboItem = item as ComboBoxItem;
@@ -1779,6 +1902,8 @@ private static void ReadConfigFromUi()
     _config["dateFallbackOrder"] = GetFallbackOrderFromUi();
     _config["dateFallbackCustomText"] = _fallbackCustomText.Text == null ? "" : _fallbackCustomText.Text;
     _config["realTimePreview"] = _realTimeCheck.IsChecked == true ? "true" : "false";
+    _config["execParallel"] = GetComboTag(_execParallelCombo) ?? "2";
+    _config["execVerify"] = _execVerifyCheck != null && _execVerifyCheck.IsChecked == true ? "true" : "false";
     _config["checksumAlgorithm"] = GetComboTag(_algorithmCombo) ?? "CRC32";
     _config["checksumDigits"] = _digitsText.Text == null ? "" : _digitsText.Text.Trim();
     _config["checksumPrefix"] = _prefixText.Text == null ? "" : _prefixText.Text;
@@ -1879,6 +2004,30 @@ private static void FilterExtensions_TextChanged(object sender, TextChangedEvent
 }
 
 private static void FilterMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+
+    // 重命名模式的默认模板不带日期层级；仅当模板仍是“默认模板”时才自动切换，
+    // 避免覆盖用户已经手工修改的模板。
+    string newMode = GetComboTag(_filterModeCombo) ?? "skip";
+    string currentTemplate = GetTemplateText();
+    string currentTrimmed = currentTemplate == null ? "" : currentTemplate.Trim();
+    string oldDefault = GetDefaultTemplateForMode(_config["filterMode"]);
+    if (currentTrimmed.Length == 0 ||
+        string.Equals(currentTrimmed, oldDefault, StringComparison.Ordinal))
+    {
+        string newDefault = GetDefaultTemplateForMode(newMode);
+        if (!string.Equals(oldDefault, newDefault, StringComparison.Ordinal))
+        {
+            _suppressEditor = true;
+            SetTemplateText(newDefault);
+            _suppressEditor = false;
+        }
+    }
+    ApplyUiConfig();
+}
+
+private static void ExecSetting_Changed(object sender, RoutedEventArgs e)
 {
     if (_suppressEvents) return;
     ApplyUiConfig();
@@ -2309,6 +2458,9 @@ private static Dictionary<string, object> BuildFileItem(string path)
         item["HashHex"] = null;
         item["HashPending"] = false;
         item["TargetPath"] = "";
+        item["Action"] = "";
+        item["ExecState"] = "";
+        item["ExecDetails"] = "";
         item["Status"] = "";
         item["Error"] = "";
         item["HasError"] = false;
@@ -2623,8 +2775,11 @@ private static void RecomputeAll()
     string customRoot = _config["rootPath"];
     bool customRootMissing = (rootMode == "custom" &&
         (customRoot == null || customRoot.Trim().Length == 0));
+    string filterMode = _config["filterMode"];
+    string filterExtensions = _config["filterExtensions"];
+    bool hasFilter = filterExtensions != null && filterExtensions.Length > 0;
 
-    // 第一遍：计算每个文件的目标路径。
+    // 第一遍：计算每个文件的动作和目标路径。
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
@@ -2636,14 +2791,20 @@ private static void RecomputeAll()
         item["HashHex"] = null;
         item["HashPending"] = false;
         item["FilterSkipped"] = false;
+        item["ExecState"] = "";
+        item["ExecDetails"] = "";
 
         string itemExtension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
-        bool filterSkip = ShouldSkipByFilter(itemExtension, _config["filterExtensions"], _config["filterMode"]);
+        bool extensionMatched = hasFilter && ExtensionMatchesFilter(itemExtension, filterExtensions);
+        bool filterSkip = ShouldSkipByFilter(itemExtension, filterExtensions, filterMode);
         item["FilterSkipped"] = filterSkip;
         item["IsSkipped"] = filterSkip || GetBool(item, "DateSkipped");
+        item["Action"] = ResolveAction(filterMode, extensionMatched, hasFilter, true);
         if (GetBool(item, "IsSkipped"))
         {
+            item["Action"] = "跳过";
             item["Status"] = filterSkip ? "过滤跳过" : "日期跳过";
+            RefreshRowDetails(item);
             continue;
         }
 
@@ -2708,6 +2869,29 @@ private static void RecomputeAll()
         }
 
         item["TargetPath"] = target;
+
+        string sourcePath = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
+        string sourceDir = Convert.ToString(item["Dir"], CultureInfo.InvariantCulture);
+        string targetDir = "";
+        try
+        {
+            targetDir = Path.GetDirectoryName(target);
+        }
+        catch
+        {
+            targetDir = "";
+        }
+        bool sameDirectory = string.Equals(sourceDir == null ? "" : sourceDir.TrimEnd('\\'),
+            targetDir == null ? "" : targetDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        string action = ResolveAction(filterMode, extensionMatched, hasFilter, sameDirectory);
+        item["Action"] = action;
+        if ((action == "复制" || action == "移动") &&
+            string.Equals(sourcePath, target, StringComparison.OrdinalIgnoreCase))
+        {
+            SetRowError(item, "目标路径与源路径相同，无法执行" + action, "路径错误");
+            continue;
+        }
+
         if (hashPending)
         {
             item["IsPending"] = true;
@@ -2851,6 +3035,10 @@ private static string BuildDetails(Dictionary<string, object> item)
         builder.AppendLine("校验码：" + _config["checksumAlgorithm"] + " = " + hash);
 
     builder.AppendLine("目标路径：" + Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture));
+    builder.AppendLine("动作：" + Convert.ToString(item["Action"], CultureInfo.InvariantCulture));
+    string execDetails = Convert.ToString(item["ExecDetails"], CultureInfo.InvariantCulture);
+    if (execDetails != null && execDetails.Length > 0)
+        builder.AppendLine("执行结果：" + execDetails);
     string error = Convert.ToString(item["Error"], CultureInfo.InvariantCulture);
     builder.AppendLine("状态：" + Convert.ToString(item["Status"], CultureInfo.InvariantCulture) +
         (error == null || error.Length == 0 ? "" : "；" + error));
@@ -2885,6 +3073,11 @@ private static void UpdateStatus()
 
     bool realTime = GetConfigBool(_config, "realTimePreview", true);
     _previewButton.IsEnabled = (!realTime && !_scanning);
+    if (_executeButton != null)
+        _executeButton.IsEnabled = false;
+
+    if (_executing)
+        return;
 
     if (_previewDirty && !_scanning)
     {
@@ -2922,6 +3115,8 @@ private static void UpdateStatus()
     _statusText.Text = text;
 
     _applyButton.IsEnabled = (!_scanning && pending == 0 && ready > 0);
+    if (_executeButton != null)
+        _executeButton.IsEnabled = (!_scanning && pending == 0 && ready > 0 && !_executing);
     if (pending > 0 && TemplateContainsToken(_config["template"], "【校验码】"))
     {
         _progress.Visibility = Visibility.Visible;
@@ -3418,7 +3613,7 @@ private static void SaveExtensionPresetStore(Dictionary<string, string> store)
 
     Dictionary<string, object> root =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    root["presetVersion"] = "0.04";
+    root["presetVersion"] = "0.05";
     Dictionary<string, object> presets =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     foreach (KeyValuePair<string, string> pair in store)
@@ -3483,7 +3678,7 @@ private static void SavePresetStore(Dictionary<string, Dictionary<string, object
 
     Dictionary<string, object> root =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    root["presetVersion"] = "0.04";
+    root["presetVersion"] = "0.05";
 
     Dictionary<string, object> presets =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
@@ -3794,7 +3989,7 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
             return;
     }
 
-    List<string[]> pairs = new List<string[]>();
+    List<Dictionary<string, object>> outputRows = new List<Dictionary<string, object>>();
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
@@ -3803,38 +3998,11 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
         string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
         if (target == null || target.Length == 0)
             continue;
-        string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
-        pairs.Add(new string[] { source, target });
+        outputRows.Add(item);
     }
 
-    List<object> originalPaths = new List<object>();
-    List<object> targetPaths = new List<object>();
-    for (int i = 0; i < pairs.Count; i++)
-    {
-        originalPaths.Add(pairs[i][0]);
-        targetPaths.Add(pairs[i][1]);
-    }
-    if (originalPaths.Count != targetPaths.Count)
-    {
-        MessageBox.Show("输出列表配对失败，请重试。", "批量重命名器",
-            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        return;
-    }
-
-    if (_data != null)
-    {
-        _data["origPaths"] = originalPaths;
-        _data["targetPaths"] = targetPaths;
-
-        // 若用户尚未保存任何预设，则把当前配置作为“默认”预设输出，
-        // 保留旧版“输出一个当前配置预设”的行为。
-        Dictionary<string, Dictionary<string, object>> store = LoadPresetStore();
-        if (store.Count == 0)
-        {
-            store["默认"] = BuildPresetDictionary(_config);
-            SavePresetStore(store);
-        }
-    }
+    WriteOutputs(outputRows);
+    EnsureDefaultPreset();
 
     if (_window != null)
         _window.Close();
@@ -3844,6 +4012,501 @@ private static void Cancel_Click(object sender, RoutedEventArgs e)
 {
     if (_window != null)
         _window.Close();
+}
+
+// ---------------------------------------------------------------------------
+// 执行：复制 / 移动 / 重命名
+// ---------------------------------------------------------------------------
+
+private static void Execute_Click(object sender, RoutedEventArgs e)
+{
+    if (_executing)
+        return;
+
+    if (_scanning)
+    {
+        MessageBox.Show("正在读取文件属性，请稍候。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+    RefreshPreviewNow();
+
+    int ready;
+    int errors;
+    int pending;
+    CountRows(out ready, out errors, out pending);
+
+    if (pending > 0)
+    {
+        MessageBox.Show("校验码仍在计算中，请稍候。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+    if (ready == 0)
+    {
+        MessageBox.Show("没有可执行的文件，请检查过滤器、模板与文件状态。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+    if (errors > 0)
+    {
+        DialogResult answer = MessageBox.Show(
+            "有 " + errors + " 个文件存在异常，不会执行；将执行 " + ready +
+            " 个就绪文件。是否继续？", "批量重命名器",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes)
+            return;
+    }
+
+    List<Dictionary<string, object>> queue = new List<Dictionary<string, object>>();
+    for (int i = 0; i < _files.Count; i++)
+    {
+        Dictionary<string, object> item = _files[i];
+        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
+            continue;
+        string action = Convert.ToString(item["Action"], CultureInfo.InvariantCulture);
+        string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
+        if (action == null || action.Length == 0 || action == "跳过" ||
+            target == null || target.Length == 0)
+            continue;
+        item["ExecState"] = "";
+        item["ExecDetails"] = "";
+        queue.Add(item);
+    }
+
+    if (queue.Count == 0)
+    {
+        MessageBox.Show("没有可执行的文件，请检查过滤器、模板与文件状态。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    // 执行前先写出非跳过列表与动作，窗口中途关闭时数据映射仍有有效输出。
+    WriteOutputs(queue);
+    EnsureDefaultPreset();
+
+    int parallel = NormalizeParallelCount(GetConfigInt(_config, "execParallel", 2));
+    _execQueue = queue;
+    _execTotal = queue.Count;
+    _execCursor = 0;
+    _execDone = 0;
+    _execErrors = 0;
+    _execBytes = 0;
+    _execWorkers = parallel;
+    _execStop = false;
+    _executing = true;
+    _execStartTicks = DateTime.UtcNow.Ticks;
+
+    SetExecutionUiEnabled(false);
+    if (_execProgress != null)
+    {
+        _execProgress.Maximum = Math.Max(1, _execTotal);
+        _execProgress.Value = 0;
+        _execProgress.Visibility = Visibility.Visible;
+    }
+    UpdateExecutionStatus();
+    StartExecutionTimer();
+
+    for (int i = 0; i < parallel; i++)
+    {
+        Thread thread = new Thread(ExecutionWorker);
+        thread.IsBackground = true;
+        thread.Start();
+    }
+}
+
+private static void ExecutionWorker()
+{
+    try
+    {
+        while (!_execStop)
+        {
+            int index = Interlocked.Increment(ref _execCursor) - 1;
+            if (index >= _execQueue.Count)
+                break;
+            ExecuteOneFile(_execQueue[index]);
+        }
+    }
+    finally
+    {
+        int remaining = Interlocked.Decrement(ref _execWorkers);
+        if (remaining == 0)
+            PostExecutionCompleted();
+    }
+}
+
+private static void ExecuteOneFile(Dictionary<string, object> item)
+{
+    string action = Convert.ToString(item["Action"], CultureInfo.InvariantCulture);
+    string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
+    string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
+    long size = 0;
+    try
+    {
+        size = Convert.ToInt64(item["Size"], CultureInfo.InvariantCulture);
+    }
+    catch
+    {
+        size = 0;
+    }
+
+    try
+    {
+        if (action == null || action.Length == 0 || action == "跳过")
+            return;
+        if (!File.Exists(source))
+            throw new IOException("源文件不存在");
+        if (target == null || target.Length == 0)
+            throw new IOException("目标路径为空");
+
+        string targetDirectory = Path.GetDirectoryName(target);
+        if (targetDirectory == null || targetDirectory.Length == 0)
+            throw new IOException("目标路径缺少目录");
+        if (!Directory.Exists(targetDirectory))
+            Directory.CreateDirectory(targetDirectory);
+
+        if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
+        {
+            if (action == "重命名")
+            {
+                Interlocked.Increment(ref _execDone);
+                ReportExecutionRow(item, true, "已完成（目标与源相同，无需操作）", "已完成");
+                return;
+            }
+            throw new IOException("目标路径与源路径相同");
+        }
+        if (File.Exists(target))
+            throw new IOException("目标文件已存在");
+
+        bool verify = GetConfigBool(_config, "execVerify", true);
+        string verificationSourceHash = null;
+        if (verify && (action == "复制" || action == "移动"))
+        {
+            verificationSourceHash = Convert.ToString(item["HashHex"], CultureInfo.InvariantCulture);
+            if (verificationSourceHash == null || verificationSourceHash.Length == 0)
+            {
+                string hashError;
+                verificationSourceHash = ComputeHashHex(source, _config["checksumAlgorithm"], out hashError);
+                if (hashError != null)
+                    throw new IOException("执行后校验准备失败：无法计算源文件校验码（" + hashError + "）");
+            }
+        }
+
+        if (action == "复制")
+        {
+            File.Copy(source, target, false);
+            Interlocked.Add(ref _execBytes, size);
+            if (verify)
+                VerifyExecutedFile(target, verificationSourceHash);
+        }
+        else if (action == "移动")
+        {
+            bool crossVolume = !IsSameVolume(source, target);
+            if (crossVolume)
+            {
+                File.Copy(source, target, false);
+                if (verify)
+                    VerifyExecutedFile(target, verificationSourceHash);
+                try
+                {
+                    File.Delete(source);
+                }
+                catch
+                {
+                    try { File.Delete(target); }
+                    catch { }
+                    throw new IOException("跨卷移动失败：无法删除源文件");
+                }
+                Interlocked.Add(ref _execBytes, size);
+            }
+            else
+            {
+                File.Move(source, target);
+                if (verify)
+                    VerifyExecutedFile(target, verificationSourceHash);
+            }
+        }
+        else if (action == "重命名")
+        {
+            File.Move(source, target);
+        }
+        else
+        {
+            throw new IOException("未知动作：" + action);
+        }
+
+        Interlocked.Increment(ref _execDone);
+        ReportExecutionRow(item, true, action + "完成" +
+            (verify && (action == "复制" || action == "移动") ? "，校验通过" : ""), "已完成");
+    }
+    catch (Exception ex)
+    {
+        Interlocked.Increment(ref _execErrors);
+        ReportExecutionRow(item, false, ex.Message, "执行失败");
+    }
+}
+
+private static bool IsSameVolume(string source, string target)
+{
+    string sourceRoot = Path.GetPathRoot(source);
+    string targetRoot = Path.GetPathRoot(target);
+    return string.Equals(sourceRoot == null ? "" : sourceRoot,
+        targetRoot == null ? "" : targetRoot, StringComparison.OrdinalIgnoreCase);
+}
+
+private static void VerifyExecutedFile(string target, string expectedHash)
+{
+    string error;
+    string targetHash = ComputeHashHex(target, _config["checksumAlgorithm"], out error);
+    if (error != null)
+        throw new IOException("执行后校验失败：无法计算目标文件校验码（" + error + "）");
+    if (!string.Equals(expectedHash, targetHash, StringComparison.OrdinalIgnoreCase))
+        throw new IOException("执行后校验失败：目标文件校验码与源文件不一致");
+
+    if (!TemplateContainsToken(_config["template"], "【校验码】"))
+        return;
+
+    string badge = BuildChecksumBadge(_config["checksumAlgorithm"],
+        GetConfigInt(_config, "checksumDigits", 8),
+        _config["checksumPrefix"], _config["checksumSuffix"], expectedHash);
+    string fileName = Path.GetFileName(target);
+    if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
+        throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+private static void ReportExecutionRow(Dictionary<string, object> item, bool success,
+    string message, string status)
+{
+    if (_window == null)
+        return;
+    try
+    {
+        _window.Dispatcher.BeginInvoke(new Action(delegate()
+        {
+            if (_window == null || _config == null)
+                return;
+            lock (_execRowLock)
+            {
+                item["ExecState"] = success ? "done" : "error";
+                item["ExecDetails"] = message == null ? "" : message;
+                item["Status"] = status;
+                if (success)
+                {
+                    item["HasError"] = false;
+                    item["IsPending"] = false;
+                    item["Error"] = "";
+                }
+                else
+                {
+                    item["HasError"] = true;
+                    item["IsPending"] = false;
+                    item["Error"] = message == null ? "执行失败" : message;
+                }
+                RefreshRowDetails(item);
+                if (_grid != null)
+                    _grid.Items.Refresh();
+                UpdateExecutionStatus();
+            }
+        }));
+    }
+    catch
+    {
+        // 窗口已关闭时忽略界面更新。
+    }
+}
+
+private static void StartExecutionTimer()
+{
+    StopExecutionTimer();
+    _execTimer = new DispatcherTimer();
+    _execTimer.Interval = TimeSpan.FromMilliseconds(200);
+    _execTimer.Tick += ExecutionTimer_Tick;
+    _execTimer.Start();
+}
+
+private static void StopExecutionTimer()
+{
+    if (_execTimer != null)
+    {
+        _execTimer.Stop();
+        _execTimer = null;
+    }
+}
+
+private static void ExecutionTimer_Tick(object sender, EventArgs e)
+{
+    UpdateExecutionStatus();
+}
+
+private static void UpdateExecutionStatus()
+{
+    if (_execStatusText == null)
+        return;
+
+    int total = _execTotal;
+    int done = _execDone;
+    int errors = _execErrors;
+    int finished = done + errors;
+
+    long bytes = Interlocked.Read(ref _execBytes);
+    long startTicks = _execStartTicks;
+    double seconds = startTicks > 0
+        ? (DateTime.UtcNow.Ticks - startTicks) / (double)TimeSpan.TicksPerSecond : 0;
+    if (seconds < 0.001)
+        seconds = 0.001;
+
+    string transfer = bytes > 0 ? FormatSize((long)(bytes / seconds)) + "/s" : "—";
+    string speed = (finished / seconds).ToString("0.0", CultureInfo.CurrentCulture) + " 个/s";
+
+    _execStatusText.Text = "执行总数 " + total + "；已完成 " + done + "；错误 " + errors +
+        "；传输速度 " + transfer + "；执行速度 " + speed;
+
+    if (_execProgress != null)
+    {
+        _execProgress.Maximum = Math.Max(1, total);
+        _execProgress.Value = finished;
+        _execProgress.Visibility = total > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+}
+
+private static void PostExecutionCompleted()
+{
+    if (_window == null)
+        return;
+    try
+    {
+        _window.Dispatcher.BeginInvoke(new Action(delegate()
+        {
+            if (_window == null)
+                return;
+            _executing = false;
+            _execStop = false;
+            StopExecutionTimer();
+            UpdateExecutionStatus();
+
+            bool shouldClose = _closeAfterExecution;
+            _closeAfterExecution = false;
+            if (shouldClose)
+            {
+                if (_window != null)
+                    _window.Close();
+                return;
+            }
+
+            if (_execStatusText != null)
+                _execStatusText.Text += _execErrors > 0 ? "；执行结束（存在错误）" : "；执行完成";
+            if (_executeButton != null)
+            {
+                _executeButton.Content = "再次执行";
+                _executeButton.IsEnabled = true;
+            }
+            SetExecutionUiEnabled(true);
+            UpdateStatus();
+            WriteOutputs(_execQueue);
+            EnsureDefaultPreset();
+        }));
+    }
+    catch
+    {
+        // 窗口已关闭时忽略。
+    }
+}
+
+private static void SetExecutionUiEnabled(bool enabled)
+{
+    if (_configPanel != null)
+        _configPanel.IsEnabled = enabled;
+    if (_executeButton != null)
+        _executeButton.IsEnabled = enabled;
+    if (_loadPresetButton != null)
+        _loadPresetButton.IsEnabled = enabled;
+    if (_savePresetButton != null)
+        _savePresetButton.IsEnabled = enabled;
+    if (_realTimeCheck != null)
+        _realTimeCheck.IsEnabled = enabled;
+    if (_execParallelCombo != null)
+        _execParallelCombo.IsEnabled = enabled;
+    if (_execVerifyCheck != null)
+        _execVerifyCheck.IsEnabled = enabled;
+    if (!enabled)
+    {
+        if (_applyButton != null)
+            _applyButton.IsEnabled = false;
+        if (_previewButton != null)
+            _previewButton.IsEnabled = false;
+    }
+}
+
+private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
+{
+    if (_data == null)
+        return;
+
+    List<object> originalPaths = new List<object>();
+    List<object> targetPaths = new List<object>();
+    List<object> actions = new List<object>();
+    for (int i = 0; i < sourceRows.Count; i++)
+    {
+        Dictionary<string, object> item = sourceRows[i];
+        if (GetBool(item, "IsSkipped"))
+            continue;
+        string action = Convert.ToString(item["Action"], CultureInfo.InvariantCulture);
+        if (action == null || action.Length == 0 || action == "跳过")
+            continue;
+        string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
+        if (target == null || target.Length == 0)
+            continue;
+        originalPaths.Add(Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture));
+        targetPaths.Add(target);
+        actions.Add(action);
+    }
+
+    if (originalPaths.Count != targetPaths.Count || originalPaths.Count != actions.Count)
+    {
+        MessageBox.Show("输出列表配对失败，请重试。", "批量重命名器",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return;
+    }
+
+    _data["origPaths"] = originalPaths;
+    _data["targetPaths"] = targetPaths;
+    _data["actions"] = actions;
+}
+
+private static void EnsureDefaultPreset()
+{
+    if (_data == null)
+        return;
+    Dictionary<string, Dictionary<string, object>> store = LoadPresetStore();
+    if (store.Count == 0)
+    {
+        store["默认"] = BuildPresetDictionary(_config);
+        SavePresetStore(store);
+    }
+}
+
+private static void Window_Closing(object sender, CancelEventArgs e)
+{
+    if (!_executing)
+        return;
+
+    DialogResult answer = MessageBox.Show(
+        "正在执行文件操作。\n\n确定要停止并关闭窗口吗？\n已开始的文件操作会完成，尚未开始的项目不再执行。",
+        "批量重命名器", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+    if (answer != DialogResult.Yes)
+    {
+        e.Cancel = true;
+        return;
+    }
+
+    e.Cancel = true;
+    _execStop = true;
+    _closeAfterExecution = true;
+    if (_execStatusText != null)
+        _execStatusText.Text = "正在停止执行，请稍候…";
 }
 
 // ---------------------------------------------------------------------------
@@ -3873,7 +4536,7 @@ private static void TokenButton_Click(object sender, RoutedEventArgs e)
 
 private static void ResetTemplate_Click(object sender, RoutedEventArgs e)
 {
-    SetTemplateText(DefaultTemplate);
+    SetTemplateText(GetDefaultTemplateForMode(GetComboTag(_filterModeCombo) ?? "skip"));
     ScheduleApply();
 }
 
@@ -4044,6 +4707,9 @@ private static void Window_Closed(object sender, EventArgs e)
     _hashStop = true;
     _hashRunning = false;
     _hashAlgorithm = "";
+    _execStop = true;
+    _executing = false;
+    StopExecutionTimer();
     if (_debounceTimer != null)
     {
         _debounceTimer.Stop();
@@ -4084,6 +4750,12 @@ private static void Window_Closed(object sender, EventArgs e)
     _presetListBox = null;
     _loadPresetButton = null;
     _savePresetButton = null;
+    _configPanel = null;
+    _execParallelCombo = null;
+    _execVerifyCheck = null;
+    _executeButton = null;
+    _execProgress = null;
+    _execStatusText = null;
     _rows = new ObservableCollection<Dictionary<string, object>>();
     _files = new List<Dictionary<string, object>>();
     _paths = new List<string>();

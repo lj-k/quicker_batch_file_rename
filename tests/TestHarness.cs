@@ -289,15 +289,35 @@ public static class TestHarness
         Check(!CoreUnderTest.ShouldSkipByFilter("txt", "jpg;png", "skip"),
             "filter: keep non-matching in skip mode");
         Check(CoreUnderTest.ShouldSkipByFilter("txt", "jpg;png", "execute"),
-            "filter: skip non-matching in execute mode");
+            "filter: legacy execute becomes rename whitelist");
         Check(!CoreUnderTest.ShouldSkipByFilter("png", "jpg;png", "execute"),
-            "filter: keep matching in execute mode");
-        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "", "execute"),
+            "filter: keep matching in rename whitelist");
+        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "", "rename"),
             "filter: empty list does not filter");
         Check(CoreUnderTest.ShouldSkipByFilter("txt", "*", "skip"),
             "filter: wildcard matches all in skip mode");
-        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "*", "execute"),
-            "filter: wildcard matches all in execute mode");
+        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "*", "rename"),
+            "filter: wildcard matches all in rename mode");
+        CheckEqual("skip", CoreUnderTest.NormalizeFilterMode("跳过"), "filter: mode alias skip");
+        CheckEqual("copy", CoreUnderTest.NormalizeFilterMode("复制"), "filter: mode alias copy");
+        CheckEqual("move", CoreUnderTest.NormalizeFilterMode("移动"), "filter: mode alias move");
+        CheckEqual("rename", CoreUnderTest.NormalizeFilterMode("重命名"), "filter: mode alias rename");
+        CheckEqual("重命名", CoreUnderTest.ResolveAction("rename", true, false, true),
+            "action: rename same directory");
+        CheckEqual("复制", CoreUnderTest.ResolveAction("rename", true, false, false),
+            "action: rename becomes copy when directory changes");
+        CheckEqual("复制", CoreUnderTest.ResolveAction("copy", true, true, true),
+            "action: copy mode");
+        CheckEqual("移动", CoreUnderTest.ResolveAction("move", true, true, true),
+            "action: move mode");
+        CheckEqual("跳过", CoreUnderTest.ResolveAction("copy", false, true, true),
+            "action: non-matching is skipped in whitelist mode");
+        CheckEqual("跳过", CoreUnderTest.ResolveAction("skip", true, true, true),
+            "action: matching is skipped in blacklist mode");
+        CheckEqual("重命名", CoreUnderTest.ResolveAction("skip", false, true, true),
+            "action: non-matching keeps rename in blacklist mode");
+        CheckEqual("复制", CoreUnderTest.ResolveAction("skip", false, true, false),
+            "action: non-matching becomes copy when directory changes");
     }
 
     private static void TestPreset()
@@ -307,11 +327,13 @@ public static class TestHarness
         config["rootPath"] = @"D:\Out";
         config["startYear"] = "2010";
         config["filterExtensions"] = "jpg;png";
-        config["filterMode"] = "execute";
+        config["filterMode"] = "move";
         config["dateSource"] = "exif";
         config["dateFallbackOrder"] = "exif,created,custom,empty,skip";
         config["dateFallbackCustomText"] = "兜底日期";
         config["realTimePreview"] = "false";
+        config["execParallel"] = "5";
+        config["execVerify"] = "false";
         config["checksumAlgorithm"] = "SHA-256";
         config["checksumDigits"] = "16";
         config["checksumPrefix"] = "P";
@@ -319,14 +341,16 @@ public static class TestHarness
         config["template"] = "【根路径】/X-【校验码】.【扩展名】";
 
         Dictionary<string, object> preset = CoreUnderTest.BuildPresetDictionary(config);
-        Check(Convert.ToString(preset["presetVersion"]) == "0.04", "preset: version");
+        Check(Convert.ToString(preset["presetVersion"]) == "0.05", "preset: version");
         Check(Convert.ToString(preset["rootMode"]) == "custom", "preset: root mode");
         Check(Convert.ToString(preset["checksumDigits"]) == "16", "preset: digits");
         Check(Convert.ToString(preset["filterExtensions"]) == "jpg;png", "preset: filter extensions");
-        Check(Convert.ToString(preset["filterMode"]) == "execute", "preset: filter mode");
+        Check(Convert.ToString(preset["filterMode"]) == "move", "preset: filter mode");
         Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,custom,empty,skip", "preset: fallback order");
         Check(Convert.ToString(preset["dateFallbackCustomText"]) == "兜底日期", "preset: fallback custom text");
         Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
+        Check(Convert.ToString(preset["execParallel"]) == "5", "preset: exec parallel");
+        Check(Convert.ToString(preset["execVerify"]) == "false", "preset: exec verify");
 
         Dictionary<string, string> loaded = CoreUnderTest.CreateDefaultConfig(2000);
         bool applied = CoreUnderTest.ApplyPresetDictionary(preset, loaded);
@@ -335,10 +359,12 @@ public static class TestHarness
         CheckEqual("2010", loaded["startYear"], "preset: start year");
         CheckEqual("exif", loaded["dateSource"], "preset: date source");
         CheckEqual("jpg;png", loaded["filterExtensions"], "preset: filter extensions roundtrip");
-        CheckEqual("execute", loaded["filterMode"], "preset: filter mode roundtrip");
+        CheckEqual("move", loaded["filterMode"], "preset: filter mode roundtrip");
         CheckEqual("exif,created,custom,empty,skip", loaded["dateFallbackOrder"], "preset: order roundtrip");
         CheckEqual("兜底日期", loaded["dateFallbackCustomText"], "preset: fallback custom roundtrip");
         CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
+        CheckEqual("5", loaded["execParallel"], "preset: exec parallel roundtrip");
+        CheckEqual("false", loaded["execVerify"], "preset: exec verify roundtrip");
         CheckEqual("SHA-256", loaded["checksumAlgorithm"], "preset: algorithm");
         CheckEqual("16", loaded["checksumDigits"], "preset: digits roundtrip");
         CheckEqual("P", loaded["checksumPrefix"], "preset: prefix");
@@ -353,23 +379,37 @@ public static class TestHarness
         CheckEqual("filename,exif,modified,created,empty", defaults["dateFallbackOrder"], "preset: default fallback order");
         CheckEqual("", defaults["dateFallbackCustomText"], "preset: default fallback custom empty");
         CheckEqual("true", defaults["realTimePreview"], "preset: default realtime");
+        CheckEqual("2", defaults["execParallel"], "preset: default exec parallel");
+        CheckEqual("true", defaults["execVerify"], "preset: default exec verify");
 
         Dictionary<string, string> partial = CoreUnderTest.CreateDefaultConfig(2000);
         Dictionary<string, object> p2 = new Dictionary<string, object>();
         p2["checksumAlgorithm"] = "CRC32";
         p2["checksumDigits"] = "99";
+        p2["execParallel"] = "99";
         Check(CoreUnderTest.ApplyPresetDictionary(p2, partial), "preset: partial applied");
         CheckEqual("8", partial["checksumDigits"], "preset: digits clamped to algorithm max");
+        CheckEqual("8", partial["execParallel"], "preset: exec parallel clamped to 8");
 
         Dictionary<string, string> aliases = CoreUnderTest.CreateDefaultConfig(2000);
         Dictionary<string, object> p3 = new Dictionary<string, object>();
         p3["dateSource"] = "修改日期";
         p3["checksumAlgorithm"] = "sha256";
         p3["rootMode"] = "其他文件夹";
+        p3["filterMode"] = "execute";
         Check(CoreUnderTest.ApplyPresetDictionary(p3, aliases), "preset: aliases applied");
         CheckEqual("modified", aliases["dateSource"], "preset: Chinese date alias");
         CheckEqual("SHA-256", aliases["checksumAlgorithm"], "preset: algorithm alias");
         CheckEqual("custom", aliases["rootMode"], "preset: root alias");
+        CheckEqual("rename", aliases["filterMode"], "preset: legacy execute migrates to rename");
+        CheckEqual(CoreUnderTest.RenameDefaultTemplate, aliases["template"],
+            "preset: rename mode without template uses rename default");
+
+        Dictionary<string, string> renameConfig = CoreUnderTest.CreateDefaultConfig(2000);
+        renameConfig["filterMode"] = "rename";
+        CoreUnderTest.NormalizeConfig(renameConfig);
+        CheckEqual(CoreUnderTest.DefaultTemplate, renameConfig["template"],
+            "preset: explicit generic template is preserved in rename mode");
     }
 
     public static int Main(string[] args)

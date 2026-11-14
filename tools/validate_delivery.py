@@ -54,8 +54,11 @@ required = {
     "BtnLoadPreset", "BtnSavePreset", "BtnResetTemplate",
     "BtnTokenYyyy", "BtnTokenMm", "BtnTokenDd", "BtnTokenRoot",
     "BtnTokenName", "BtnTokenExt", "BtnTokenHash",
+    "ConfigPanel", "ExecParallelCombo", "ExecVerifyCheck", "BtnExecute",
+    "ExecProgress", "ExecStatusText",
 }
 check(required <= xaml_names, "all required controls are named in XAML")
+check('Header="动作"' in xaml_text, "DataGrid has action column")
 
 dist_text = (ROOT / "dist" / "QuickerAux.cs").read_text(encoding="utf-8")
 dist_code = "\n".join(
@@ -68,16 +71,19 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check("// 版本：0.04" in dist_text, "deployed code version is 0.04")
+check(dist_text.splitlines()[1] == "// 版本：0.05", "deployed code version is 0.05")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
+check("ExecuteOneFile" in dist_text, "deployed code contains execution worker")
+check('"actions"' in dist_text, "deployed code outputs action list")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.04" in core_text, "core source version is 0.04")
-check('preset["presetVersion"] = "0.04"' in core_text, "preset version is 0.04")
+check("// 版本：0.05" in core_text, "core source version is 0.05")
+check('preset["presetVersion"] = "0.05"' in core_text, "preset version is 0.05")
 check("ShouldSkipByFilter" in core_text, "core contains filter decision")
-check('// 版本：0.04' in aux_text, "aux source version is 0.04")
-check("XAML 版本：0.04" in xaml_text, "XAML version is 0.04")
+check("ResolveAction" in core_text, "core contains action resolution")
+check('// 版本：0.05' in aux_text, "aux source version is 0.05")
+check("XAML 版本：0.05" in xaml_text, "XAML version is 0.05")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -100,12 +106,12 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check(req_text.count("0.0.5") == 1 and "> 版本：0.0.5" in req_text, "requirements doc version 0.0.5 is unique")
+check(req_text.count("0.0.6") == 1 and "> 版本：0.0.6" in req_text, "requirements doc version 0.0.6 is unique")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 
 for name, version in [
-    ("doc/开发说明.md", "0.04"),
-    ("doc/测试报告.md", "0.04"),
+    ("doc/开发说明.md", "0.05"),
+    ("doc/测试报告.md", "0.05"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -117,7 +123,7 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.04]" in changelog_text, "CHANGELOG has 0.04 entry")
+    check("[0.05]" in changelog_text, "CHANGELOG has 0.05 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
@@ -126,7 +132,7 @@ check("版本：0.01" in agents, "AGENTS.md has version 0.01")
 check("所有的用户输入完整记录在userinput文件夹" in agents, "AGENTS.md keeps user rule")
 
 inputs = sorted((ROOT / "userinput").glob("*.md"))
-check(len(inputs) >= 6, "userinput contains at least 6 records")
+check(len(inputs) >= 7, "userinput contains at least 7 records")
 
 for note in notes:
     print(note)

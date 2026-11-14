@@ -8,13 +8,14 @@ using System.Text.RegularExpressions;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.04
+// 版本：0.05
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
 // ============================================================================
 
 public const string DefaultTemplate = "【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】";
+public const string RenameDefaultTemplate = "【根路径】/【源文件名】-【校验码】.【扩展名】";
 
 public static readonly string[] SupportedAlgorithms = new string[] { "CRC32", "BLAKE3", "MD5", "SHA-256" };
 public static readonly string[] SupportedDateSources = new string[] { "filename", "exif", "modified", "created" };
@@ -240,32 +241,78 @@ public static string NormalizeExtensionList(string value)
 public static string NormalizeFilterMode(string mode)
 {
     string value = (mode == null ? "" : mode.Trim()).ToLowerInvariant();
+    if (value == "copy" || value == "复制")
+        return "copy";
+    if (value == "move" || value == "移动")
+        return "move";
+    if (value == "rename" || value == "重命名")
+        return "rename";
+    // 旧版 execute/执行/白名单表示按模板处理，迁移为 rename；目标目录变化时动作会自动变为复制。
     if (value == "execute" || value == "执行" || value == "白名单" || value == "include")
-        return "execute";
+        return "rename";
     return "skip";
+}
+
+public static string GetDefaultTemplateForMode(string mode)
+{
+    return NormalizeFilterMode(mode) == "rename" ? RenameDefaultTemplate : DefaultTemplate;
+}
+
+/// <summary>
+/// 根据决策模式、过滤器命中和目标目录是否变化，决定每个文件在展示界面中的动作。
+/// 跳过模式是黑名单：命中列表的文件跳过，其他文件按模板执行（同目录为重命名，跨目录为复制）。
+/// 复制/移动/重命名模式是白名单：仅命中列表的文件执行，其他文件跳过；空列表表示不过滤。
+/// </summary>
+public static string ResolveAction(string mode, bool extensionMatched, bool hasFilterList, bool sameDirectory)
+{
+    string normalized = NormalizeFilterMode(mode);
+    string fallback = sameDirectory ? "重命名" : "复制";
+
+    if (normalized == "skip")
+    {
+        if (!hasFilterList)
+            return fallback;
+        return extensionMatched ? "跳过" : fallback;
+    }
+
+    if (hasFilterList && !extensionMatched)
+        return "跳过";
+
+    if (normalized == "copy")
+        return "复制";
+    if (normalized == "move")
+        return "移动";
+    return sameDirectory ? "重命名" : "复制";
+}
+
+public static int NormalizeParallelCount(int value)
+{
+    if (value < 1) return 1;
+    if (value > 8) return 8;
+    return value;
 }
 
 public static bool ShouldSkipByFilter(string extension, string extensions, string mode)
 {
     string list = NormalizeExtensionList(extensions);
-    if (list.Length == 0)
+    bool hasFilter = list.Length > 0;
+    bool matched = hasFilter && ExtensionMatchesFilter(extension, list);
+    return ResolveAction(mode, matched, hasFilter, true) == "跳过";
+}
+
+public static bool ExtensionMatchesFilter(string extension, string normalizedExtensions)
+{
+    if (normalizedExtensions == null || normalizedExtensions.Length == 0)
         return false;
 
-    bool match = false;
-    string[] items = list.Split(';');
     string normalized = (extension == null ? "" : extension.Trim().TrimStart('.')).ToLowerInvariant();
+    string[] items = normalizedExtensions.Split(';');
     for (int i = 0; i < items.Length; i++)
     {
         if (items[i] == "*" || items[i] == normalized)
-        {
-            match = true;
-            break;
-        }
+            return true;
     }
-
-    if (NormalizeFilterMode(mode) == "execute")
-        return !match;
-    return match;
+    return false;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -1113,6 +1160,8 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
     config["dateFallbackCustomText"] = "";
     config["realTimePreview"] = "true";
+    config["execParallel"] = "2";
+    config["execVerify"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
     config["checksumPrefix"] = "[";
@@ -1193,6 +1242,8 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     string customText = GetConfigString(config, "dateFallbackCustomText", oldFallback5);
     config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
+    config["execParallel"] = NormalizeParallelCount(GetConfigInt(config, "execParallel", 2)).ToString(CultureInfo.InvariantCulture);
+    config["execVerify"] = GetConfigBool(config, "execVerify", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
     if (!IsSupportedAlgorithm(algorithm))
@@ -1210,9 +1261,9 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "[");
     config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "]");
 
-    string template = GetConfigString(config, "template", DefaultTemplate);
-    if (template == null)
-        template = DefaultTemplate;
+    string template = GetConfigString(config, "template", "");
+    if (template == null || template.Trim().Length == 0)
+        template = GetDefaultTemplateForMode(config["filterMode"]);
     config["template"] = template;
 }
 
@@ -1221,7 +1272,7 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.04";
+    preset["presetVersion"] = "0.05";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
@@ -1231,6 +1282,8 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
     preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
     preset["realTimePreview"] = normalized["realTimePreview"];
+    preset["execParallel"] = normalized["execParallel"];
+    preset["execVerify"] = normalized["execVerify"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
     preset["checksumPrefix"] = normalized["checksumPrefix"];
@@ -1245,12 +1298,14 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
         return false;
 
     bool applied = false;
+    bool templateApplied = false;
     string[] keys = new string[] {
         "rootMode", "rootPath", "startYear",
         "filterExtensions", "filterMode",
         "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
         "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
+        "execParallel", "execVerify",
         "checksumPrefix", "checksumSuffix", "template"
     };
     for (int i = 0; i < keys.Length; i++)
@@ -1260,8 +1315,19 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
             continue;
         config[keys[i]] = Convert.ToString(raw, CultureInfo.InvariantCulture);
         applied = true;
+        if (keys[i] == "template")
+            templateApplied = true;
     }
     if (applied)
+    {
+        if (!templateApplied)
+        {
+            string current = GetConfigString(config, "template", "");
+            if (current == null || current.Length == 0 ||
+                current == DefaultTemplate || current == RenameDefaultTemplate)
+                config["template"] = GetDefaultTemplateForMode(GetConfigString(config, "filterMode", "skip"));
+        }
         NormalizeConfig(config);
+    }
     return applied;
 }
