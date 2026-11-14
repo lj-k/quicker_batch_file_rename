@@ -2,6 +2,10 @@ node_modules/
 target/
 __pycache__/
 .env
-dist/
 *.log
 .DS_Store
+
+# 测试生成物
+tests/Generated*.cs
+tests/*.exe
+tests/*.dll
