@@ -230,8 +230,8 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.30" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.30")
+check("> 版本：0.0.31" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.31")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
