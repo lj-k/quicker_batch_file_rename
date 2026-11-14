@@ -11,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.10
+// 版本：0.06.11
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -498,6 +498,165 @@ public static string ClassifyPerformanceBottleneck(int count, double seconds, do
     if (cpuRatio <= 0.30)
         return "I/O";
     return "CPU/I/O混合";
+}
+
+// 默认冲突比较校验码：CRC32 速度快，最终仍以逐字节比较确认。
+public const string ConflictCompareAlgorithm = "CRC32";
+
+[ThreadStatic] private static byte[] _compareBufferA;
+[ThreadStatic] private static byte[] _compareBufferB;
+
+// 在文件名（不含扩展名）后追加 " (n)"，从1开始由调用方递增。
+public static string BuildNumberedSuffixPath(string path, int number)
+{
+    if (path == null || path.Length == 0 || number < 1)
+        return path;
+    string directory;
+    try { directory = Path.GetDirectoryName(path); }
+    catch { directory = null; }
+    string fileName = Path.GetFileNameWithoutExtension(path);
+    string extension = Path.GetExtension(path);
+    string suffixed = (fileName == null ? "" : fileName) + " (" +
+        number.ToString(CultureInfo.InvariantCulture) + ")" +
+        (extension == null ? "" : extension);
+    if (directory == null || directory.Length == 0)
+        return suffixed;
+    return Path.Combine(directory, suffixed);
+}
+
+// 判断目标文件是否与源文件内容相同：大小 -> 默认校验码 -> 逐字节。
+// 云端占位文件不读取内容，避免因此触发下载。
+public static bool TryCompareFileContent(string source, string target,
+    out bool identical, out bool cloudPlaceholder, out string error)
+{
+    identical = false;
+    cloudPlaceholder = false;
+    error = null;
+    if (source == null || source.Length == 0 || target == null || target.Length == 0)
+    {
+        error = "路径为空";
+        return false;
+    }
+
+    try
+    {
+        FileInfo sourceInfo = new FileInfo(source);
+        FileInfo targetInfo = new FileInfo(target);
+        if (!sourceInfo.Exists)
+        {
+            error = "源文件不存在";
+            return false;
+        }
+        if (!targetInfo.Exists)
+        {
+            error = "目标文件不存在";
+            return false;
+        }
+
+        int sourceAttributes = 0;
+        int targetAttributes = 0;
+        try { sourceAttributes = (int)sourceInfo.Attributes; } catch { }
+        try { targetAttributes = (int)targetInfo.Attributes; } catch { }
+        if (IsCloudPlaceholderAttributes(sourceAttributes) ||
+            IsCloudPlaceholderAttributes(targetAttributes))
+        {
+            cloudPlaceholder = true;
+            error = "云端占位文件不读取内容";
+            return false;
+        }
+
+        if (sourceInfo.Length != targetInfo.Length)
+        {
+            identical = false;
+            return true;
+        }
+
+        string hashError;
+        string sourceHash = ComputeHashHex(source, ConflictCompareAlgorithm, out hashError);
+        if (sourceHash == null)
+        {
+            error = "源文件校验码计算失败：" + (hashError == null ? "未知错误" : hashError);
+            return false;
+        }
+        string targetHash = ComputeHashHex(target, ConflictCompareAlgorithm, out hashError);
+        if (targetHash == null)
+        {
+            error = "目标文件校验码计算失败：" + (hashError == null ? "未知错误" : hashError);
+            return false;
+        }
+        if (!string.Equals(sourceHash, targetHash, StringComparison.OrdinalIgnoreCase))
+        {
+            identical = false;
+            return true;
+        }
+
+        return FilesAreBinaryEqual(source, target, out identical, out error);
+    }
+    catch (Exception ex)
+    {
+        error = ex.Message;
+        return false;
+    }
+}
+
+// 逐字节比较两个本地文件；调用前应已完成大小与校验码预筛。
+public static bool FilesAreBinaryEqual(string first, string second,
+    out bool equal, out string error)
+{
+    equal = false;
+    error = null;
+    try
+    {
+        if (_compareBufferA == null)
+            _compareBufferA = new byte[81920];
+        if (_compareBufferB == null)
+            _compareBufferB = new byte[81920];
+
+        using (FileStream left = new FileStream(first, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite, 81920, FileOptions.SequentialScan))
+        using (FileStream right = new FileStream(second, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite, 81920, FileOptions.SequentialScan))
+        {
+            if (left.Length != right.Length)
+                return true;
+
+            while (true)
+            {
+                int leftRead = ReadBlock(left, _compareBufferA);
+                int rightRead = ReadBlock(right, _compareBufferB);
+                if (leftRead != rightRead)
+                    return true;
+                if (leftRead == 0)
+                {
+                    equal = true;
+                    return true;
+                }
+                for (int i = 0; i < leftRead; i++)
+                {
+                    if (_compareBufferA[i] != _compareBufferB[i])
+                        return true;
+                }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        error = ex.Message;
+        return false;
+    }
+}
+
+private static int ReadBlock(Stream stream, byte[] buffer)
+{
+    int total = 0;
+    while (total < buffer.Length)
+    {
+        int read = stream.Read(buffer, total, buffer.Length - total);
+        if (read <= 0)
+            break;
+        total += read;
+    }
+    return total;
 }
 
 // Windows 云筛选器占位属性：内容不在本地，打开文件会触发下载。

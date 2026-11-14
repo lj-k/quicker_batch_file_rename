@@ -1021,6 +1021,65 @@ public static class TestHarness
             "corner: different UNC shares");
     }
 
+    // 目标冲突：数字后缀与内容比较（大小 -> CRC32 -> 二进制）。
+    private static void TestTargetConflictHelpers()
+    {
+        string directory = Path.Combine(Path.GetTempPath(),
+            "qk-conflict-" + Guid.NewGuid().ToString("N"));
+        string first = Path.Combine(directory, "first.txt");
+        string second = Path.Combine(directory, "second.txt");
+        string third = Path.Combine(directory, "third.txt");
+        string missing = Path.Combine(directory, "missing.txt");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(first, "hello");
+            File.WriteAllText(second, "hello");
+            File.WriteAllText(third, "world");
+
+            bool identical;
+            bool cloud;
+            string error;
+            Check(CoreUnderTest.TryCompareFileContent(first, second,
+                out identical, out cloud, out error) && identical && !cloud,
+                "conflict: identical content");
+            Check(CoreUnderTest.TryCompareFileContent(first, third,
+                out identical, out cloud, out error) && !identical,
+                "conflict: different same-size content");
+            File.WriteAllText(third, "hello!");
+            Check(CoreUnderTest.TryCompareFileContent(first, third,
+                out identical, out cloud, out error) && !identical,
+                "conflict: different size content");
+            Check(!CoreUnderTest.TryCompareFileContent(first, missing,
+                out identical, out cloud, out error),
+                "conflict: missing target rejected");
+
+            bool equal;
+            Check(CoreUnderTest.FilesAreBinaryEqual(first, second, out equal, out error) && equal,
+                "conflict: binary equal");
+            Check(CoreUnderTest.FilesAreBinaryEqual(first, third, out equal, out error) && !equal,
+                "conflict: binary different");
+
+            string input = Path.Combine(directory, "photo.jpg");
+            CheckEqual(Path.Combine(directory, "photo (1).jpg"),
+                CoreUnderTest.BuildNumberedSuffixPath(input, 1), "suffix: first number");
+            CheckEqual(Path.Combine(directory, "photo (12).jpg"),
+                CoreUnderTest.BuildNumberedSuffixPath(input, 12), "suffix: two digits");
+            CheckEqual(Path.Combine(directory, "photo (1)"),
+                CoreUnderTest.BuildNumberedSuffixPath(Path.Combine(directory, "photo"), 1),
+                "suffix: no extension");
+            CheckEqual(Path.Combine(directory, "archive.tar (1).gz"),
+                CoreUnderTest.BuildNumberedSuffixPath(Path.Combine(directory, "archive.tar.gz"), 1),
+                "suffix: multi-dot extension");
+            CheckEqual(input, CoreUnderTest.BuildNumberedSuffixPath(input, 0),
+                "suffix: invalid number unchanged");
+        }
+        finally
+        {
+            try { Directory.Delete(directory, true); } catch { }
+        }
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -1039,6 +1098,7 @@ public static class TestHarness
         TestPresetStructureCompatibility();
         TestExtensionPresetStore();
         TestCornerCases();
+        TestTargetConflictHelpers();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
         return _failed == 0 ? 0 : 1;

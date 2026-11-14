@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.10 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.11 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -452,31 +452,67 @@
                 BorderThickness="1"
                 CornerRadius="6"
                 Margin="0,0,0,6">
-            <DataGrid x:Name="PreviewGrid"
-                      Margin="1"
-                      AutoGenerateColumns="False"
-                      IsReadOnly="True"
-                      CanUserAddRows="False"
-                      CanUserDeleteRows="False"
-                      CanUserResizeRows="False"
-                      CanUserSortColumns="False"
-                      HeadersVisibility="Column"
-                      SelectionMode="Single"
-                      SelectionUnit="FullRow"
-                      GridLinesVisibility="Horizontal"
-                      HorizontalGridLinesBrush="#EAECF0"
-                      AlternationCount="2"
-                      RowHeight="31"
-                      ColumnHeaderHeight="34"
-                      BorderThickness="0"
-                      EnableRowVirtualization="True"
-                      VirtualizingPanel.IsVirtualizing="True"
-                      VirtualizingPanel.VirtualizationMode="Recycling">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="动作" Binding="{Binding [Action]}" Width="68"/>
-                    <DataGridTextColumn Header="源路径名" Binding="{Binding [SourcePath]}" Width="2*"/>
-                    <DataGridTextColumn Header="目标路径名/文件名" Binding="{Binding [TargetPath]}" Width="3*"/>
-                </DataGrid.Columns>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Margin="8,6,8,2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="筛选" Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
+                    <TextBox x:Name="GridFilterText" Grid.Column="1" Style="{StaticResource FieldText}"/>
+                    <TextBlock Grid.Column="2" Text="状态" Style="{StaticResource FieldLabel}" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="GridStatusFilterCombo" Grid.Column="3" Width="120" Style="{StaticResource FieldCombo}" SelectedIndex="0">
+                        <ComboBoxItem Content="全部状态" Tag="all"/>
+                        <ComboBoxItem Content="就绪" Tag="ready"/>
+                        <ComboBoxItem Content="异常" Tag="error"/>
+                        <ComboBoxItem Content="跳过" Tag="skipped"/>
+                        <ComboBoxItem Content="校验中" Tag="pending"/>
+                        <ComboBoxItem Content="执行成功" Tag="done"/>
+                        <ComboBoxItem Content="执行失败" Tag="execerror"/>
+                    </ComboBox>
+                    <TextBlock x:Name="GridFilterCountText"
+                               Grid.Column="4"
+                               Text="共 0 行"
+                               Style="{StaticResource CardHint}"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"/>
+                </Grid>
+                <DataGrid x:Name="PreviewGrid"
+                          Grid.Row="1"
+                          Margin="1"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          CanUserAddRows="False"
+                          CanUserDeleteRows="False"
+                          CanUserResizeRows="False"
+                          CanUserSortColumns="True"
+                          HeadersVisibility="Column"
+                          SelectionMode="Single"
+                          SelectionUnit="FullRow"
+                          GridLinesVisibility="Horizontal"
+                          HorizontalGridLinesBrush="#EAECF0"
+                          AlternationCount="2"
+                          RowHeight="31"
+                          ColumnHeaderHeight="34"
+                          BorderThickness="0"
+                          EnableRowVirtualization="True"
+                          VirtualizingPanel.IsVirtualizing="True"
+                          VirtualizingPanel.VirtualizationMode="Recycling">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="动作" Binding="{Binding [Action]}" SortMemberPath="Action" Width="78"/>
+                        <DataGridTextColumn Header="状态" Binding="{Binding [Status]}" SortMemberPath="Status" Width="120"/>
+                        <DataGridTextColumn Header="源路径名" Binding="{Binding [SourcePath]}" SortMemberPath="SourcePath" Width="2*"/>
+                        <DataGridTextColumn Header="目标路径名/文件名" Binding="{Binding [TargetPath]}" SortMemberPath="TargetPath" Width="3*"/>
+                        <DataGridTextColumn Header="异常状态" Binding="{Binding [Error]}" SortMemberPath="Error" Width="1.4*"/>
+                        <DataGridTextColumn Header="执行结果" Binding="{Binding [ExecDetails]}" SortMemberPath="ExecDetails" Width="1.4*"/>
+                    </DataGrid.Columns>
                 <DataGrid.RowStyle>
                     <Style TargetType="DataGridRow">
                         <Setter Property="ToolTip" Value="{Binding [Details]}"/>
@@ -512,6 +548,7 @@
                     </Style>
                 </DataGrid.CellStyle>
             </DataGrid>
+            </Grid>
         </Border>
 
         <Border Grid.Row="4"

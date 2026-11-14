@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.10
+// 版本：0.06.11
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.10
+// 版本：0.06.11
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -518,6 +518,165 @@ public static string ClassifyPerformanceBottleneck(int count, double seconds, do
     if (cpuRatio <= 0.30)
         return "I/O";
     return "CPU/I/O混合";
+}
+
+// 默认冲突比较校验码：CRC32 速度快，最终仍以逐字节比较确认。
+public const string ConflictCompareAlgorithm = "CRC32";
+
+[ThreadStatic] private static byte[] _compareBufferA;
+[ThreadStatic] private static byte[] _compareBufferB;
+
+// 在文件名（不含扩展名）后追加 " (n)"，从1开始由调用方递增。
+public static string BuildNumberedSuffixPath(string path, int number)
+{
+    if (path == null || path.Length == 0 || number < 1)
+        return path;
+    string directory;
+    try { directory = Path.GetDirectoryName(path); }
+    catch { directory = null; }
+    string fileName = Path.GetFileNameWithoutExtension(path);
+    string extension = Path.GetExtension(path);
+    string suffixed = (fileName == null ? "" : fileName) + " (" +
+        number.ToString(CultureInfo.InvariantCulture) + ")" +
+        (extension == null ? "" : extension);
+    if (directory == null || directory.Length == 0)
+        return suffixed;
+    return Path.Combine(directory, suffixed);
+}
+
+// 判断目标文件是否与源文件内容相同：大小 -> 默认校验码 -> 逐字节。
+// 云端占位文件不读取内容，避免因此触发下载。
+public static bool TryCompareFileContent(string source, string target,
+    out bool identical, out bool cloudPlaceholder, out string error)
+{
+    identical = false;
+    cloudPlaceholder = false;
+    error = null;
+    if (source == null || source.Length == 0 || target == null || target.Length == 0)
+    {
+        error = "路径为空";
+        return false;
+    }
+
+    try
+    {
+        FileInfo sourceInfo = new FileInfo(source);
+        FileInfo targetInfo = new FileInfo(target);
+        if (!sourceInfo.Exists)
+        {
+            error = "源文件不存在";
+            return false;
+        }
+        if (!targetInfo.Exists)
+        {
+            error = "目标文件不存在";
+            return false;
+        }
+
+        int sourceAttributes = 0;
+        int targetAttributes = 0;
+        try { sourceAttributes = (int)sourceInfo.Attributes; } catch { }
+        try { targetAttributes = (int)targetInfo.Attributes; } catch { }
+        if (IsCloudPlaceholderAttributes(sourceAttributes) ||
+            IsCloudPlaceholderAttributes(targetAttributes))
+        {
+            cloudPlaceholder = true;
+            error = "云端占位文件不读取内容";
+            return false;
+        }
+
+        if (sourceInfo.Length != targetInfo.Length)
+        {
+            identical = false;
+            return true;
+        }
+
+        string hashError;
+        string sourceHash = ComputeHashHex(source, ConflictCompareAlgorithm, out hashError);
+        if (sourceHash == null)
+        {
+            error = "源文件校验码计算失败：" + (hashError == null ? "未知错误" : hashError);
+            return false;
+        }
+        string targetHash = ComputeHashHex(target, ConflictCompareAlgorithm, out hashError);
+        if (targetHash == null)
+        {
+            error = "目标文件校验码计算失败：" + (hashError == null ? "未知错误" : hashError);
+            return false;
+        }
+        if (!string.Equals(sourceHash, targetHash, StringComparison.OrdinalIgnoreCase))
+        {
+            identical = false;
+            return true;
+        }
+
+        return FilesAreBinaryEqual(source, target, out identical, out error);
+    }
+    catch (Exception ex)
+    {
+        error = ex.Message;
+        return false;
+    }
+}
+
+// 逐字节比较两个本地文件；调用前应已完成大小与校验码预筛。
+public static bool FilesAreBinaryEqual(string first, string second,
+    out bool equal, out string error)
+{
+    equal = false;
+    error = null;
+    try
+    {
+        if (_compareBufferA == null)
+            _compareBufferA = new byte[81920];
+        if (_compareBufferB == null)
+            _compareBufferB = new byte[81920];
+
+        using (FileStream left = new FileStream(first, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite, 81920, FileOptions.SequentialScan))
+        using (FileStream right = new FileStream(second, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite, 81920, FileOptions.SequentialScan))
+        {
+            if (left.Length != right.Length)
+                return true;
+
+            while (true)
+            {
+                int leftRead = ReadBlock(left, _compareBufferA);
+                int rightRead = ReadBlock(right, _compareBufferB);
+                if (leftRead != rightRead)
+                    return true;
+                if (leftRead == 0)
+                {
+                    equal = true;
+                    return true;
+                }
+                for (int i = 0; i < leftRead; i++)
+                {
+                    if (_compareBufferA[i] != _compareBufferB[i])
+                        return true;
+                }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        error = ex.Message;
+        return false;
+    }
+}
+
+private static int ReadBlock(Stream stream, byte[] buffer)
+{
+    int total = 0;
+    while (total < buffer.Length)
+    {
+        int read = stream.Read(buffer, total, buffer.Length - total);
+        if (read <= 0)
+            break;
+        total += read;
+    }
+    return total;
 }
 
 // Windows 云筛选器占位属性：内容不在本地，打开文件会触发下载。
@@ -2668,7 +2827,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.10
+// 版本：0.06.11
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2695,6 +2854,9 @@ private static ComboBox _algorithmCombo;
 private static TextBlock _checksumBadge;
 private static TextBlock _statusText;
 private static TextBlock _perfText;
+private static TextBox _gridFilterText;
+private static ComboBox _gridStatusFilterCombo;
+private static TextBlock _gridFilterCountText;
 private static ProgressBar _progress;
 private static Button _browseRootButton;
 private static Button _applyButton;
@@ -2741,6 +2903,7 @@ private static string _templateHashCheckKey = null;
 private static bool _templateHashCheckValue = false;
 
 private static DispatcherTimer _debounceTimer;
+private static DispatcherTimer _gridFilterTimer;
 private static TextPointer _lastCaret;
 private static bool _suppressEvents = false;
 private static bool _suppressEditor = false;
@@ -2819,7 +2982,11 @@ private sealed class RowLayout
     public bool FilterSkipped;
     public bool IsSkipped;
     public bool TargetExists;
+    public bool TargetIsDirectory;
+    public bool TargetIdentical;
     public bool TargetCheckFailed;
+    public bool TargetCompareFailed;
+    public bool TargetCloudOnly;
 }
 
 // 一次重算使用的配置快照，保证后台线程读取期间不受界面修改影响。
@@ -2898,6 +3065,9 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
     AttachToolTips();
 
     _grid.ItemsSource = _rows;
+    if (_gridStatusFilterCombo != null && _gridStatusFilterCombo.Items.Count > 0)
+        _gridStatusFilterCombo.SelectedIndex = 0;
+    ApplyGridFilter();
 
     CollectInputPaths();
     if (_paths.Count == 0)
@@ -2933,6 +3103,9 @@ private static void FindControls(Window win)
     _checksumBadge = (TextBlock)win.FindName("ChecksumBadge");
     _statusText = (TextBlock)win.FindName("StatusText");
     _perfText = (TextBlock)win.FindName("PerfText");
+    _gridFilterText = (TextBox)win.FindName("GridFilterText");
+    _gridStatusFilterCombo = (ComboBox)win.FindName("GridStatusFilterCombo");
+    _gridFilterCountText = (TextBlock)win.FindName("GridFilterCountText");
     _progress = (ProgressBar)win.FindName("Progress");
     _browseRootButton = (Button)win.FindName("BrowseRootButton");
     _applyButton = (Button)win.FindName("BtnApply");
@@ -3014,6 +3187,11 @@ private static void ResetRuntimeState()
         _debounceTimer.Stop();
         _debounceTimer = null;
     }
+    if (_gridFilterTimer != null)
+    {
+        _gridFilterTimer.Stop();
+        _gridFilterTimer = null;
+    }
 }
 
 private static void PopulateStartYears()
@@ -3074,6 +3252,12 @@ private static void AttachEvents(Window win)
     _editor.TextChanged += TemplateEditor_TextChanged;
     _editor.SelectionChanged += TemplateEditor_SelectionChanged;
     _browseRootButton.Click += BrowseRootButton_Click;
+    if (_gridFilterText != null)
+        _gridFilterText.TextChanged += delegate { RestartGridFilterTimer(); };
+    if (_gridStatusFilterCombo != null)
+        _gridStatusFilterCombo.SelectionChanged += delegate { ApplyGridFilter(); };
+    if (_grid != null)
+        _grid.Sorting += PreviewGrid_Sorting;
 
     AttachClick("BtnTokenYyyy", TokenButton_Click);
     AttachClick("BtnTokenMm", TokenButton_Click);
@@ -3178,6 +3362,185 @@ private static void SetTip(FrameworkElement element, string text)
     element.ToolTip = tip;
     ToolTipService.SetShowDuration(element, 60000);
     ToolTipService.SetShowOnDisabled(element, true);
+}
+
+// ---------------------------------------------------------------------------
+// 预览列表筛选与排序（仅影响显示，不改变执行与输出顺序）
+// ---------------------------------------------------------------------------
+
+private static void RestartGridFilterTimer()
+{
+    if (_gridFilterTimer == null)
+    {
+        _gridFilterTimer = new DispatcherTimer();
+        _gridFilterTimer.Interval = TimeSpan.FromMilliseconds(200);
+        _gridFilterTimer.Tick += delegate(object sender, EventArgs e)
+        {
+            _gridFilterTimer.Stop();
+            ApplyGridFilter();
+        };
+    }
+    _gridFilterTimer.Stop();
+    _gridFilterTimer.Start();
+}
+
+private static void ApplyGridFilter()
+{
+    if (_grid == null)
+        return;
+    _grid.Items.Filter = GridRowFilter;
+    _grid.Items.Refresh();
+    UpdateGridFilterCount();
+}
+
+private static void RefreshGridFilterIfActive()
+{
+    if (_grid == null)
+        return;
+    if (IsGridFilterActive())
+        ApplyGridFilter();
+    else
+        UpdateGridFilterCount();
+}
+
+private static bool IsGridFilterActive()
+{
+    if (_gridFilterText != null && _gridFilterText.Text != null &&
+        _gridFilterText.Text.Trim().Length > 0)
+        return true;
+    string tag = GetComboTag(_gridStatusFilterCombo);
+    return tag != null && tag.Length > 0 && tag != "all";
+}
+
+private static bool GridRowFilter(object value)
+{
+    Dictionary<string, object> item = value as Dictionary<string, object>;
+    if (item == null)
+        return false;
+
+    string statusTag = GetComboTag(_gridStatusFilterCombo);
+    if (statusTag != null && statusTag.Length > 0 && statusTag != "all")
+    {
+        if (GetRowFilterState(item) != statusTag)
+            return false;
+    }
+
+    string filter = _gridFilterText == null || _gridFilterText.Text == null
+        ? "" : _gridFilterText.Text.Trim();
+    if (filter.Length == 0)
+        return true;
+
+    return ContainsText(item, "SourcePath", filter) ||
+        ContainsText(item, "TargetPath", filter) ||
+        ContainsText(item, "FileName", filter) ||
+        ContainsText(item, "Error", filter) ||
+        ContainsText(item, "ExecDetails", filter);
+}
+
+private static bool ContainsText(Dictionary<string, object> item, string key, string text)
+{
+    object value;
+    if (!item.TryGetValue(key, out value) || value == null)
+        return false;
+    string content = Convert.ToString(value, CultureInfo.InvariantCulture);
+    return content != null && content.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+}
+
+private static string GetRowFilterState(Dictionary<string, object> item)
+{
+    string execState = Convert.ToString(item["ExecState"], CultureInfo.InvariantCulture);
+    if (execState == "done")
+        return "done";
+    if (execState == "error")
+        return "execerror";
+    if (GetBool(item, "HasError"))
+        return "error";
+    if (GetBool(item, "IsSkipped"))
+        return "skipped";
+    if (GetBool(item, "IsPending"))
+        return "pending";
+    return "ready";
+}
+
+private static void UpdateGridFilterCount()
+{
+    if (_grid == null || _gridFilterCountText == null)
+        return;
+    int shown = _grid.Items.Count;
+    int total = _rows.Count;
+    _gridFilterCountText.Text = shown == total
+        ? "共 " + total.ToString(CultureInfo.InvariantCulture) + " 行"
+        : "显示 " + shown.ToString(CultureInfo.InvariantCulture) + " / " +
+            total.ToString(CultureInfo.InvariantCulture) + " 行";
+}
+
+private static void PreviewGrid_Sorting(object sender, DataGridSortingEventArgs e)
+{
+    e.Handled = true;
+    if (_grid == null || _scanning || e.Column == null)
+        return;
+    string key = e.Column.SortMemberPath;
+    if (key == null || key.Length == 0)
+        return;
+
+    ListSortDirection direction = e.Column.SortDirection == ListSortDirection.Ascending
+        ? ListSortDirection.Descending : ListSortDirection.Ascending;
+    foreach (DataGridColumn column in _grid.Columns)
+    {
+        if (!object.ReferenceEquals(column, e.Column))
+            column.SortDirection = null;
+    }
+    e.Column.SortDirection = direction;
+    SortPreviewRows(key, direction);
+}
+
+private static void SortPreviewRows(string key, ListSortDirection direction)
+{
+    List<Dictionary<string, object>> sorted =
+        new List<Dictionary<string, object>>(_rows);
+    Dictionary<Dictionary<string, object>, int> originalOrder =
+        new Dictionary<Dictionary<string, object>, int>();
+    for (int i = 0; i < _rows.Count; i++)
+        originalOrder[_rows[i]] = i;
+
+    sorted.Sort(delegate(Dictionary<string, object> left, Dictionary<string, object> right)
+    {
+        int result = CompareRowValue(left, right, key);
+        if (result == 0)
+            result = originalOrder[left].CompareTo(originalOrder[right]);
+        return direction == ListSortDirection.Ascending ? result : -result;
+    });
+
+    _rows = new ObservableCollection<Dictionary<string, object>>(sorted);
+    _grid.ItemsSource = _rows;
+    ApplyGridFilter();
+}
+
+private static int CompareRowValue(Dictionary<string, object> left,
+    Dictionary<string, object> right, string key)
+{
+    object leftValue;
+    object rightValue;
+    left.TryGetValue(key, out leftValue);
+    right.TryGetValue(key, out rightValue);
+
+    if (key == "Size")
+    {
+        long leftSize = Convert.ToInt64(leftValue == null ? 0 : leftValue, CultureInfo.InvariantCulture);
+        long rightSize = Convert.ToInt64(rightValue == null ? 0 : rightValue, CultureInfo.InvariantCulture);
+        return leftSize.CompareTo(rightSize);
+    }
+    if (key == "HasError" || key == "IsSkipped" || key == "IsPending")
+    {
+        bool leftFlag = leftValue is bool && (bool)leftValue;
+        bool rightFlag = rightValue is bool && (bool)rightValue;
+        return leftFlag.CompareTo(rightFlag);
+    }
+
+    string leftText = Convert.ToString(leftValue, CultureInfo.InvariantCulture);
+    string rightText = Convert.ToString(rightValue, CultureInfo.InvariantCulture);
+    return string.Compare(leftText == null ? "" : leftText,
+        rightText == null ? "" : rightText, StringComparison.OrdinalIgnoreCase);
 }
 
 // ---------------------------------------------------------------------------
@@ -3918,6 +4281,7 @@ private static void AddFileBatch(List<Dictionary<string, object>> batch)
     }
     if (_scanning)
         _statusText.Text = "正在读取文件属性… 已加载 " + _files.Count + " 个文件";
+    UpdateGridFilterCount();
 }
 
 private static void FinishScan(int generation)
@@ -4534,11 +4898,12 @@ private static RowLayout ComputeLayout(Dictionary<string, object> item, LayoutCo
     return layout;
 }
 
-// 重复目标与目标存在性检查：存在性检查是I/O，按唯一目标并行执行。
+// 目标冲突解析：存在性检查与内容比较并行，冲突按输入顺序确定序号。
 private static bool FinalizeLayouts(RowLayout[] layouts, int generation, LayoutContext context)
 {
-    Dictionary<string, List<int>> targetMap =
-        new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+    List<int> eligible = new List<int>();
+    List<int> candidates = new List<int>();
+    HashSet<string> assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     for (int i = 0; i < layouts.Length; i++)
     {
         RowLayout layout = layouts[i];
@@ -4546,72 +4911,179 @@ private static bool FinalizeLayouts(RowLayout[] layouts, int generation, LayoutC
             continue;
         if (layout.TargetPath == null || layout.TargetPath.Length == 0)
             continue;
-        List<int> list;
-        if (!targetMap.TryGetValue(layout.TargetPath, out list))
-        {
-            list = new List<int>();
-            targetMap[layout.TargetPath] = list;
-        }
-        list.Add(i);
-    }
-    foreach (KeyValuePair<string, List<int>> pair in targetMap)
-    {
-        if (pair.Value.Count <= 1)
-            continue;
-        for (int i = 0; i < pair.Value.Count; i++)
-            SetLayoutError(layouts[pair.Value[i]], "目标路径重复：" + pair.Key, "目标重复");
-    }
+        eligible.Add(i);
 
-    List<int> checkIndices = new List<int>();
-    for (int i = 0; i < layouts.Length; i++)
-    {
-        RowLayout layout = layouts[i];
-        if (layout == null || layout.HasError || layout.IsPending || layout.IsSkipped)
-            continue;
-        if (layout.TargetPath == null || layout.TargetPath.Length == 0)
-            continue;
         string source = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
         if (string.Equals(source, layout.TargetPath, StringComparison.OrdinalIgnoreCase))
         {
             layout.Status = "无变化";
-            continue;
+            assigned.Add(layout.TargetPath);
         }
-        checkIndices.Add(i);
+        else
+        {
+            candidates.Add(i);
+        }
     }
 
     int cancelled = 0;
     int existenceWorkers;
-    RunIndexedParallel(checkIndices.Count, SelectIoWorkers(checkIndices.Count), delegate(int slot)
+    RunIndexedParallel(candidates.Count, SelectIoWorkers(candidates.Count), delegate(int slot)
     {
         if (Thread.VolatileRead(ref _recomputeGeneration) != generation)
         {
             Interlocked.Exchange(ref cancelled, 1);
             return;
         }
-        int index = checkIndices[slot];
+        int index = candidates[slot];
+        string target = layouts[index].TargetPath;
         try
         {
-            layouts[index].TargetExists = File.Exists(layouts[index].TargetPath) ||
-                Directory.Exists(layouts[index].TargetPath);
+            if (File.Exists(target))
+            {
+                layouts[index].TargetExists = true;
+            }
+            else if (Directory.Exists(target))
+            {
+                layouts[index].TargetExists = true;
+                layouts[index].TargetIsDirectory = true;
+            }
         }
         catch
         {
             layouts[index].TargetCheckFailed = true;
         }
     }, out existenceWorkers);
-    context.IoWorkers = existenceWorkers;
     if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
         return false;
 
-    for (int i = 0; i < checkIndices.Count; i++)
+    List<int> compareIndices = new List<int>();
+    for (int i = 0; i < candidates.Count; i++)
     {
-        RowLayout layout = layouts[checkIndices[i]];
+        int index = candidates[i];
+        RowLayout layout = layouts[index];
+        if (layout.TargetExists && !layout.TargetIsDirectory && !layout.TargetCheckFailed)
+            compareIndices.Add(index);
+    }
+
+    int compareWorkers = 0;
+    if (compareIndices.Count > 0)
+    {
+        RunIndexedParallel(compareIndices.Count, SelectIoWorkers(compareIndices.Count), delegate(int slot)
+        {
+            if (Thread.VolatileRead(ref _recomputeGeneration) != generation)
+            {
+                Interlocked.Exchange(ref cancelled, 1);
+                return;
+            }
+            int index = compareIndices[slot];
+            string source = Convert.ToString(_files[index]["SourcePath"], CultureInfo.InvariantCulture);
+            bool identical;
+            bool cloudPlaceholder;
+            string error;
+            if (TryCompareFileContent(source, layouts[index].TargetPath,
+                out identical, out cloudPlaceholder, out error))
+            {
+                layouts[index].TargetIdentical = identical;
+            }
+            else
+            {
+                layouts[index].TargetCompareFailed = true;
+                layouts[index].TargetCloudOnly = cloudPlaceholder;
+            }
+        }, out compareWorkers);
+    }
+    context.IoWorkers = Math.Max(existenceWorkers, compareWorkers);
+    if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
+        return false;
+
+    // 顺序解析冲突：相同内容按复制/移动决策分别跳过或删除源文件；
+    // 内容不同或无法比较时追加 (n)，同时避免批内重复。
+    for (int i = 0; i < eligible.Count; i++)
+    {
+        int index = eligible[i];
+        RowLayout layout = layouts[index];
+        if (string.Equals(layout.Status, "无变化", StringComparison.Ordinal))
+            continue;
         if (layout.TargetCheckFailed)
+        {
             SetLayoutError(layout, "无法检查目标路径是否存在", "路径错误");
-        else if (layout.TargetExists)
-            SetLayoutError(layout, "目标文件或目录已存在：" + layout.TargetPath, "目标已存在");
+            continue;
+        }
+
+        string baseTarget = layout.TargetPath;
+        bool assignedConflict = assigned.Contains(baseTarget);
+
+        if (layout.TargetExists && !layout.TargetIsDirectory && layout.TargetIdentical)
+        {
+            if (layout.Action == "移动" || layout.Action == "重命名")
+            {
+                layout.Action = "删除原文件";
+                layout.Status = "目标相同，删除源文件";
+            }
+            else
+            {
+                layout.Action = "跳过";
+                layout.IsSkipped = true;
+                layout.FilterSkipped = false;
+                layout.Status = "目标相同，跳过";
+            }
+            assigned.Add(baseTarget);
+            continue;
+        }
+
+        if (layout.TargetExists || assignedConflict)
+        {
+            string newTarget;
+            if (!TryBuildAvailableTarget(baseTarget, assigned, out newTarget))
+            {
+                SetLayoutError(layout, "目标冲突且无法生成可用序号", "目标冲突");
+                continue;
+            }
+            layout.TargetPath = newTarget;
+            if (layout.TargetIsDirectory)
+                layout.Status = "目标为目录，已加序号";
+            else if (layout.TargetCompareFailed && layout.TargetCloudOnly)
+                layout.Status = "目标为云端占位，未下载比较，已加序号";
+            else if (layout.TargetCompareFailed)
+                layout.Status = "目标无法比较，已加序号";
+            else if (layout.TargetExists)
+                layout.Status = "目标已存在且内容不同，已加序号";
+            else
+                layout.Status = "批内目标重复，已加序号";
+            assigned.Add(newTarget);
+            continue;
+        }
+
+        assigned.Add(baseTarget);
     }
     return true;
+}
+
+private static bool TryBuildAvailableTarget(string baseTarget, HashSet<string> assigned,
+    out string newTarget)
+{
+    newTarget = null;
+    for (int number = 1; number <= 9999; number++)
+    {
+        string candidate = BuildNumberedSuffixPath(baseTarget, number);
+        if (candidate == null || candidate.Length == 0 || assigned.Contains(candidate))
+            continue;
+        try
+        {
+            if (File.Exists(candidate) || Directory.Exists(candidate))
+                continue;
+        }
+        catch
+        {
+            continue;
+        }
+        string error;
+        if (!ValidateCrossPlatformPath(candidate, out error))
+            continue;
+        newTarget = candidate;
+        return true;
+    }
+    return false;
 }
 
 private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
@@ -4636,6 +5108,7 @@ private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
     }
 
     _grid.Items.Refresh();
+    RefreshGridFilterIfActive();
     UpdateStatus();
     RefreshErrorBanner(context.TemplateValid ? null :
         (context.BadToken == null || context.BadToken.Length == 0
@@ -5092,7 +5565,10 @@ private static void CountRows(out int ready, out int errors, out int pending, ou
     {
         Dictionary<string, object> item = _files[i];
         if (GetBool(item, "IsSkipped"))
+        {
             skipped++;
+            continue;
+        }
         if (GetBool(item, "HasError"))
             errors++;
         else if (GetBool(item, "IsPending"))
@@ -6153,6 +6629,33 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         if (target == null || target.Length == 0)
             throw new IOException("目标路径为空");
 
+        if (action == "删除原文件")
+        {
+            if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("目标路径与源路径相同，不能删除源文件");
+            bool identical;
+            bool cloudPlaceholder;
+            string compareError;
+            if (!TryCompareFileContent(source, target, out identical, out cloudPlaceholder,
+                out compareError) || !identical)
+            {
+                string reason = cloudPlaceholder ? "目标为云端占位，无法确认内容"
+                    : (compareError == null ? "目标内容与源文件不再相同" : compareError);
+                throw new IOException("已取消删除源文件：" + reason);
+            }
+            try
+            {
+                File.Delete(source);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException("目标相同，但无法删除源文件：" + ex.Message);
+            }
+            Interlocked.Increment(ref _execDone);
+            ReportExecutionRow(item, true, "目标相同，已删除源文件", "已完成");
+            return;
+        }
+
         string targetDirectory = Path.GetDirectoryName(target);
         if (targetDirectory == null || targetDirectory.Length == 0)
             throw new IOException("目标路径缺少目录");
@@ -6461,6 +6964,7 @@ private static void PostExecutionCompleted()
             _execStop = false;
             StopExecutionTimer();
             FlushExecutionUi();
+            RefreshGridFilterIfActive();
             UpdateExecutionStatus();
 
             bool shouldClose = _closeAfterExecution;
@@ -6804,6 +7308,11 @@ private static void Window_Closed(object sender, EventArgs e)
         _debounceTimer.Stop();
         _debounceTimer = null;
     }
+    if (_gridFilterTimer != null)
+    {
+        _gridFilterTimer.Stop();
+        _gridFilterTimer = null;
+    }
 
     _window = null;
     _grid = null;
@@ -6818,6 +7327,10 @@ private static void Window_Closed(object sender, EventArgs e)
     _algorithmCombo = null;
     _checksumBadge = null;
     _statusText = null;
+    _perfText = null;
+    _gridFilterText = null;
+    _gridStatusFilterCombo = null;
+    _gridFilterCountText = null;
     _progress = null;
     _browseRootButton = null;
     _applyButton = null;
