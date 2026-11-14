@@ -31,6 +31,14 @@ public static class TestHarness
         Check(ok, name);
     }
 
+    private static void CheckEqual(int expected, int actual, string name)
+    {
+        bool ok = expected == actual;
+        if (!ok)
+            Console.WriteLine("      expected: " + expected + "\n      actual  : " + actual);
+        Check(ok, name);
+    }
+
     private static byte[] MakePattern(int length)
     {
         byte[] data = new byte[length];
@@ -320,6 +328,117 @@ public static class TestHarness
             "action: non-matching becomes copy when directory changes");
     }
 
+    private static void TestTransferEngine()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "qk-transfer-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Check(CoreUnderTest.IsNetworkTransferPath(@"\\server\share\a.txt"),
+                "transfer: UNC detected as network");
+            CheckEqual("network:262144",
+                CoreUnderTest.DescribeTransferProfile(@"\\server\share\a.txt", 1024),
+                "transfer: network buffer profile");
+            CheckEqual(262144, CoreUnderTest.SelectCopyBufferSize(@"\\server\share\a.txt", 1024),
+                "transfer: network buffer size");
+            CheckEqual(262144, CoreUnderTest.SelectCopyBufferSizeForDrive(DriveType.Network, 1024),
+                "transfer: network drive profile");
+            CheckEqual(65536, CoreUnderTest.SelectCopyBufferSizeForDrive(DriveType.CDRom, 1024),
+                "transfer: cdrom drive profile");
+            CheckEqual(1048576, CoreUnderTest.SelectCopyBufferSizeForDrive(DriveType.Removable, 1024),
+                "transfer: removable small file profile");
+            CheckEqual(2097152, CoreUnderTest.SelectCopyBufferSizeForDrive(
+                DriveType.Removable, 600L * 1024 * 1024), "transfer: removable large file profile");
+            CheckEqual(1048576, CoreUnderTest.SelectCopyBufferSizeForDrive(DriveType.Fixed, 1024),
+                "transfer: fixed small file profile");
+            CheckEqual(4194304, CoreUnderTest.SelectCopyBufferSizeForDrive(
+                DriveType.Fixed, 2L * 1024 * 1024 * 1024), "transfer: fixed large file profile");
+            CheckEqual(4194304, CoreUnderTest.SelectCopyBufferSizeForDrive(
+                DriveType.Unknown, 2L * 1024 * 1024 * 1024), "transfer: unknown large file profile");
+            Check(CoreUnderTest.SelectCopyBufferSize(Path.Combine(dir, "a.bin"), 2L * 1024 * 1024 * 1024) >=
+                CoreUnderTest.TransferBufferDefault, "transfer: large local buffer");
+            Check(CoreUnderTest.IsSameVolumePath(Path.Combine(dir, "a.txt"), Path.Combine(dir, "b.txt")),
+                "transfer: same directory is same volume");
+            CheckEqual(200, CoreUnderTest.GetTransferRetryDelayMs(1), "transfer: retry delay 1");
+            CheckEqual(400, CoreUnderTest.GetTransferRetryDelayMs(2), "transfer: retry delay 2");
+            CheckEqual(2000, CoreUnderTest.GetTransferRetryDelayMs(9), "transfer: retry delay cap");
+            Check(CoreUnderTest.IsTransientTransferError(32), "transfer: sharing violation is transient");
+            Check(!CoreUnderTest.IsTransientTransferError(2), "transfer: missing file is not transient");
+            CheckEqual("磁盘空间不足", CoreUnderTest.DescribeTransferError(112),
+                "transfer: disk full message");
+            CheckEqual("网络传输超时", CoreUnderTest.DescribeTransferError(121),
+                "transfer: network timeout message");
+
+            string source = Path.Combine(dir, "source.bin");
+            string target = Path.Combine(dir, "target.bin");
+            byte[] data = new byte[2 * 1024 * 1024 + 123];
+            for (int i = 0; i < data.Length; i++)
+                data[i] = (byte)(i % 251);
+            File.WriteAllBytes(source, data);
+            DateTime stamp = new DateTime(2020, 2, 2, 3, 4, 5, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(source, stamp);
+
+            long reported = 0;
+            Action<long> progress = delegate(long delta) { reported += delta; };
+            string copyError;
+            Check(CoreUnderTest.CopyFileWithRetry(source, target, progress, null, 3, out copyError),
+                "transfer: copy succeeds");
+            CheckEqual("", copyError == null ? "" : copyError, "transfer: copy no error");
+            Check(File.Exists(target), "transfer: copy target exists");
+            CheckEqual(Convert.ToBase64String(data), Convert.ToBase64String(File.ReadAllBytes(target)),
+                "transfer: copy content matches");
+            CheckEqual(data.Length.ToString(), reported.ToString(), "transfer: copy progress total");
+            Check(File.GetLastWriteTimeUtc(target) == stamp, "transfer: copy preserves timestamp");
+            Check(File.GetAttributes(target) == File.GetAttributes(source),
+                "transfer: copy preserves attributes");
+            Check(Directory.GetFiles(dir, ".qk-*.tmp").Length == 0, "transfer: no temp files left");
+
+            string existingError;
+            Check(!CoreUnderTest.CopyFileWithRetry(source, target, null, null, 1, out existingError),
+                "transfer: existing target rejected");
+            Check(existingError != null && existingError.Contains("已存在"),
+                "transfer: existing target message");
+
+            string missingError;
+            Check(!CoreUnderTest.CopyFileWithRetry(Path.Combine(dir, "missing.bin"),
+                Path.Combine(dir, "missing-out.bin"), null, null, 1, out missingError),
+                "transfer: missing source rejected");
+            Check(missingError != null && missingError.Contains("不存在"),
+                "transfer: missing source message");
+
+            string cancelTarget = Path.Combine(dir, "cancel.bin");
+            string cancelError;
+            Check(!CoreUnderTest.CopyFileWithRetry(source, cancelTarget, null,
+                delegate() { return true; }, 1, out cancelError),
+                "transfer: cancel aborts copy");
+            Check(cancelError != null && cancelError.Contains("取消"),
+                "transfer: cancel message");
+            Check(!File.Exists(cancelTarget), "transfer: cancel leaves no target");
+
+            string moveSource = Path.Combine(dir, "move-source.bin");
+            string moveTarget = Path.Combine(dir, "move-target.bin");
+            File.WriteAllBytes(moveSource, new byte[] { 1, 2, 3, 4 });
+            string moveError;
+            Check(CoreUnderTest.MoveFileWithRetry(moveSource, moveTarget, 3, out moveError),
+                "transfer: move succeeds");
+            Check(!File.Exists(moveSource) && File.Exists(moveTarget),
+                "transfer: move source removed and target exists");
+
+            Check(CoreUnderTest.CheckFreeSpace(Path.Combine(dir, "space.bin"), 1024, out copyError),
+                "transfer: free space check for small file");
+            Check(CoreUnderTest.IsFileUnchanged(source, data.Length, stamp),
+                "transfer: source stability check");
+            File.SetLastWriteTimeUtc(source, stamp.AddMinutes(1));
+            Check(!CoreUnderTest.IsFileUnchanged(source, data.Length, stamp),
+                "transfer: source change detected");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); }
+            catch { }
+        }
+    }
+
     private static void TestPreset()
     {
         Dictionary<string, string> config = CoreUnderTest.CreateDefaultConfig(2000);
@@ -422,6 +541,7 @@ public static class TestHarness
         TestTemplateAndPath();
         TestDateResolution();
         TestFilter();
+        TestTransferEngine();
         TestPreset();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);

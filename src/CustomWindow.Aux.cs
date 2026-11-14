@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.05
+// 版本：0.05.3
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2814,15 +2814,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
     string action = Convert.ToString(item["Action"], CultureInfo.InvariantCulture);
     string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
     string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
-    long size = 0;
-    try
-    {
-        size = Convert.ToInt64(item["Size"], CultureInfo.InvariantCulture);
-    }
-    catch
-    {
-        size = 0;
-    }
 
     try
     {
@@ -2866,43 +2857,72 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
             }
         }
 
+        Action<long> progress = delegate(long delta)
+        {
+            if (delta != 0)
+                Interlocked.Add(ref _execBytes, delta);
+        };
+
         if (action == "复制")
         {
-            File.Copy(source, target, false);
-            Interlocked.Add(ref _execBytes, size);
-            if (verify)
-                VerifyExecutedFile(target, verificationSourceHash);
+            string copyError;
+            if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+                throw new IOException(copyError);
+            try
+            {
+                if (verify)
+                    VerifyExecutedFile(target, verificationSourceHash);
+            }
+            catch
+            {
+                // 复制后校验失败时删除未通过校验的目标文件；源文件保持不变。
+                TryDeleteTargetFile(target);
+                throw;
+            }
         }
         else if (action == "移动")
         {
-            bool crossVolume = !IsSameVolume(source, target);
+            bool crossVolume = !IsSameVolumePath(source, target);
             if (crossVolume)
             {
-                File.Copy(source, target, false);
-                if (verify)
-                    VerifyExecutedFile(target, verificationSourceHash);
+                string copyError;
+                if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+                    throw new IOException(copyError);
+                try
+                {
+                    if (verify)
+                        VerifyExecutedFile(target, verificationSourceHash);
+                }
+                catch
+                {
+                    // 跨卷移动在删除源文件前校验；失败时删除目标，保留源文件。
+                    TryDeleteTargetFile(target);
+                    throw;
+                }
                 try
                 {
                     File.Delete(source);
                 }
                 catch
                 {
-                    try { File.Delete(target); }
-                    catch { }
+                    TryDeleteTargetFile(target);
                     throw new IOException("跨卷移动失败：无法删除源文件");
                 }
-                Interlocked.Add(ref _execBytes, size);
             }
             else
             {
-                File.Move(source, target);
+                string moveError;
+                if (!MoveFileWithRetry(source, target, 3, out moveError))
+                    throw new IOException(moveError);
                 if (verify)
                     VerifyExecutedFile(target, verificationSourceHash);
             }
         }
         else if (action == "重命名")
         {
-            File.Move(source, target);
+            string moveError;
+            if (!MoveFileWithRetry(source, target, 3, out moveError))
+                throw new IOException(moveError);
         }
         else
         {
@@ -2918,14 +2938,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         Interlocked.Increment(ref _execErrors);
         ReportExecutionRow(item, false, ex.Message, "执行失败");
     }
-}
-
-private static bool IsSameVolume(string source, string target)
-{
-    string sourceRoot = Path.GetPathRoot(source);
-    string targetRoot = Path.GetPathRoot(target);
-    return string.Equals(sourceRoot == null ? "" : sourceRoot,
-        targetRoot == null ? "" : targetRoot, StringComparison.OrdinalIgnoreCase);
 }
 
 private static void VerifyExecutedFile(string target, string expectedHash)
@@ -2946,6 +2958,24 @@ private static void VerifyExecutedFile(string target, string expectedHash)
     string fileName = Path.GetFileName(target);
     if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
         throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+private static void TryDeleteTargetFile(string path)
+{
+    if (path == null)
+        return;
+    try
+    {
+        if (File.Exists(path))
+        {
+            try { File.SetAttributes(path, FileAttributes.Normal); }
+            catch { }
+            File.Delete(path);
+        }
+    }
+    catch
+    {
+    }
 }
 
 private static void ReportExecutionRow(Dictionary<string, object> item, bool success,

@@ -1,17 +1,18 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.05
+// 版本：0.05.3
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Collections;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Reflection;
-using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -29,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.05
+// 版本：0.05.3
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -311,6 +312,598 @@ public static int NormalizeParallelCount(int value)
     if (value < 1) return 1;
     if (value > 8) return 8;
     return value;
+}
+
+// ---------------------------------------------------------------------------
+// 文件传输引擎：按驱动器类型选择缓冲策略，带进度、重试与失败清理。
+// ---------------------------------------------------------------------------
+
+public const int TransferBufferSmall = 64 * 1024;
+public const int TransferBufferNetwork = 256 * 1024;
+public const int TransferBufferDefault = 1024 * 1024;
+public const int TransferBufferRemovableLarge = 2 * 1024 * 1024;
+public const int TransferBufferLarge = 4 * 1024 * 1024;
+
+private const uint CopyFileFailIfExists = 0x00000001;
+
+private delegate int CopyProgressRoutine(
+    long totalFileSize,
+    long totalBytesTransferred,
+    long streamSize,
+    long streamBytesTransferred,
+    uint streamNumber,
+    uint callbackReason,
+    IntPtr sourceFile,
+    IntPtr destinationFile,
+    IntPtr data);
+
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+private static extern bool CopyFileEx(
+    string existingFileName,
+    string newFileName,
+    CopyProgressRoutine progressRoutine,
+    IntPtr data,
+    ref int cancel,
+    uint copyFlags);
+
+public static bool IsNetworkTransferPath(string path)
+{
+    if (path == null)
+        return false;
+    if (path.StartsWith("\\\\", StringComparison.Ordinal))
+        return true;
+    try
+    {
+        string root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root))
+            return false;
+        return new DriveInfo(root).DriveType == DriveType.Network;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+public static DriveType GetDriveTypeSafe(string path)
+{
+    if (IsNetworkTransferPath(path))
+        return DriveType.Network;
+    try
+    {
+        string root = Path.GetPathRoot(path);
+        if (string.IsNullOrEmpty(root))
+            return DriveType.Unknown;
+        return new DriveInfo(root).DriveType;
+    }
+    catch
+    {
+        return DriveType.Unknown;
+    }
+}
+
+public static int SelectCopyBufferSize(string path, long fileSize)
+{
+    if (IsNetworkTransferPath(path))
+        return TransferBufferNetwork;
+    return SelectCopyBufferSizeForDrive(GetDriveTypeSafe(path), fileSize);
+}
+
+public static int SelectCopyBufferSizeForDrive(DriveType drive, long fileSize)
+{
+    if (drive == DriveType.Network)
+        return TransferBufferNetwork;
+    if (drive == DriveType.CDRom)
+        return TransferBufferSmall;
+    if (drive == DriveType.Removable)
+        return fileSize >= 512L * 1024 * 1024 ? TransferBufferRemovableLarge : TransferBufferDefault;
+    if (drive == DriveType.Fixed || drive == DriveType.Unknown)
+        return fileSize >= 1024L * 1024 * 1024 ? TransferBufferLarge : TransferBufferDefault;
+    return TransferBufferDefault;
+}
+
+public static string DescribeTransferProfile(string path, long fileSize)
+{
+    DriveType drive = GetDriveTypeSafe(path);
+    return drive.ToString().ToLowerInvariant() + ":" + SelectCopyBufferSize(path, fileSize).ToString(CultureInfo.InvariantCulture);
+}
+
+public static bool IsSameVolumePath(string source, string target)
+{
+    string sourceRoot = Path.GetPathRoot(source);
+    string targetRoot = Path.GetPathRoot(target);
+    return string.Equals(sourceRoot == null ? "" : sourceRoot,
+        targetRoot == null ? "" : targetRoot, StringComparison.OrdinalIgnoreCase);
+}
+
+public static bool IsFileUnchanged(string path, long expectedLength, DateTime expectedLastWriteUtc)
+{
+    try
+    {
+        FileInfo info = new FileInfo(path);
+        return info.Exists && info.Length == expectedLength &&
+            info.LastWriteTimeUtc == expectedLastWriteUtc;
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+public static bool CheckFreeSpace(string targetPath, long requiredBytes, out string error)
+{
+    error = null;
+    if (requiredBytes <= 0)
+        return true;
+    if (IsNetworkTransferPath(targetPath))
+        return true;
+
+    try
+    {
+        string root = Path.GetPathRoot(targetPath);
+        if (string.IsNullOrEmpty(root))
+            return true;
+        DriveInfo drive = new DriveInfo(root);
+        if (drive.DriveType == DriveType.Network || drive.DriveType == DriveType.NoRootDirectory)
+            return true;
+        long available = drive.AvailableFreeSpace;
+        if (available <= 0)
+            return true;
+        long reserve = Math.Max(32L * 1024 * 1024, requiredBytes / 100);
+        if (available < reserve || requiredBytes > available - reserve)
+        {
+            error = "目标磁盘空间不足：需要约 " +
+                ((requiredBytes + 1023) / 1024 / 1024).ToString(CultureInfo.InvariantCulture) +
+                " MB，可用 " + (available / 1024 / 1024).ToString(CultureInfo.InvariantCulture) + " MB";
+            return false;
+        }
+    }
+    catch
+    {
+        return true;
+    }
+    return true;
+}
+
+public static int GetTransferRetryDelayMs(int attempt)
+{
+    if (attempt < 1) attempt = 1;
+    int delay = 200;
+    for (int i = 1; i < attempt && delay < 2000; i++)
+        delay *= 2;
+    return delay > 2000 ? 2000 : delay;
+}
+
+public static bool IsTransientTransferError(int errorCode)
+{
+    switch (errorCode)
+    {
+        case 5:
+        case 19:
+        case 21:
+        case 32:
+        case 33:
+        case 53:
+        case 64:
+        case 67:
+        case 121:
+        case 1231:
+            return true;
+        default:
+            return false;
+    }
+}
+
+public static string DescribeTransferError(int errorCode)
+{
+    switch (errorCode)
+    {
+        case 2: return "源文件不存在";
+        case 3: return "路径不存在";
+        case 5: return "拒绝访问";
+        case 19: return "设备未就绪";
+        case 21: return "设备未就绪";
+        case 32: return "文件被其他程序占用";
+        case 33: return "文件被锁定";
+        case 39: return "磁盘空间不足";
+        case 53: return "网络路径不可用";
+        case 64: return "网络连接已断开";
+        case 67: return "找不到网络路径";
+        case 80: return "目标文件已存在";
+        case 112: return "磁盘空间不足";
+        case 121: return "网络传输超时";
+        case 123: return "文件名语法错误";
+        case 206: return "文件名或路径过长";
+        case 1231: return "网络位置不可用";
+        case 1235: return "操作已取消";
+        default: return "文件操作失败（系统错误 " + errorCode.ToString(CultureInfo.InvariantCulture) + "）";
+    }
+}
+
+public static bool CopyFileAdaptive(string source, string target,
+    Action<long> progress, Func<bool> cancel, out string error, out int errorCode)
+{
+    error = null;
+    errorCode = 0;
+
+    if (!File.Exists(source))
+    {
+        error = "源文件不存在";
+        errorCode = 2;
+        return false;
+    }
+    if (File.Exists(target))
+    {
+        error = "目标文件已存在";
+        errorCode = 80;
+        return false;
+    }
+    if (cancel != null && cancel())
+    {
+        error = "已取消";
+        return false;
+    }
+
+    long length;
+    DateTime lastWriteUtc;
+    try
+    {
+        FileInfo info = new FileInfo(source);
+        length = info.Length;
+        lastWriteUtc = info.LastWriteTimeUtc;
+    }
+    catch (Exception ex)
+    {
+        errorCode = GetTransferErrorCode(ex);
+        error = DescribeTransferException(ex, errorCode);
+        return false;
+    }
+
+    if (!CheckFreeSpace(target, length, out error))
+    {
+        errorCode = 39;
+        return false;
+    }
+
+    string temp = BuildTransferTempPath(target);
+    bool copied = false;
+    try
+    {
+        DriveType drive = GetDriveTypeSafe(target);
+        int bufferSize = SelectCopyBufferSize(target, length);
+        bool preallocate = drive == DriveType.Fixed && length >= 64L * 1024 * 1024;
+        bool flushToDisk = drive == DriveType.Removable;
+
+        if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+        {
+            string nativeError;
+            int nativeCode;
+            if (TryCopyFileNative(source, temp, progress, cancel, out nativeError, out nativeCode))
+            {
+                copied = true;
+            }
+            else
+            {
+                error = nativeError;
+                errorCode = nativeCode;
+                TryDeleteFile(temp);
+                if (cancel != null && cancel())
+                    return false;
+                if (!IsNativeFallbackError(nativeCode))
+                    return false;
+            }
+        }
+
+        if (!copied)
+        {
+            string managedError;
+            int managedCode;
+            if (!CopyFileManaged(source, temp, length, bufferSize, preallocate, flushToDisk,
+                progress, cancel, out managedError, out managedCode))
+            {
+                error = managedError;
+                errorCode = managedCode;
+                return false;
+            }
+        }
+
+        if (!IsFileUnchanged(source, length, lastWriteUtc))
+        {
+            error = "源文件在复制期间发生变化";
+            return false;
+        }
+        if (cancel != null && cancel())
+        {
+            error = "已取消";
+            return false;
+        }
+        if (File.Exists(target))
+        {
+            error = "目标文件已存在";
+            errorCode = 80;
+            return false;
+        }
+
+        File.Move(temp, target);
+        return true;
+    }
+    catch (Exception ex)
+    {
+        errorCode = GetTransferErrorCode(ex);
+        error = DescribeTransferException(ex, errorCode);
+        return false;
+    }
+    finally
+    {
+        TryDeleteFile(temp);
+    }
+}
+
+public static bool CopyFileWithRetry(string source, string target,
+    Action<long> progress, Func<bool> cancel, int attempts, out string error)
+{
+    error = null;
+    if (attempts < 1)
+        attempts = 1;
+
+    for (int attempt = 1; attempt <= attempts; attempt++)
+    {
+        if (cancel != null && cancel())
+        {
+            error = "已取消";
+            return false;
+        }
+
+        long attemptBytes = 0;
+        Action<long> attemptProgress = null;
+        if (progress != null)
+        {
+            attemptProgress = delegate(long delta)
+            {
+                attemptBytes += delta;
+                progress(delta);
+            };
+        }
+
+        string attemptError;
+        int attemptCode;
+        bool ok = CopyFileAdaptive(source, target, attemptProgress, cancel,
+            out attemptError, out attemptCode);
+
+        if (ok)
+            return true;
+
+        if (attemptBytes != 0 && progress != null)
+            progress(-attemptBytes);
+
+        error = attemptError;
+        if (cancel != null && cancel())
+            return false;
+        if (!IsTransientTransferError(attemptCode) || attempt >= attempts)
+            return false;
+
+        Thread.Sleep(GetTransferRetryDelayMs(attempt));
+    }
+    return false;
+}
+
+public static bool MoveFileWithRetry(string source, string target, int attempts, out string error)
+{
+    error = null;
+    if (attempts < 1)
+        attempts = 1;
+
+    for (int attempt = 1; attempt <= attempts; attempt++)
+    {
+        try
+        {
+            File.Move(source, target);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            int code = GetTransferErrorCode(ex);
+            error = DescribeTransferException(ex, code);
+            if (!IsTransientTransferError(code) || attempt >= attempts)
+                return false;
+            Thread.Sleep(GetTransferRetryDelayMs(attempt));
+        }
+    }
+    return false;
+}
+
+private static bool TryCopyFileNative(string source, string target,
+    Action<long> progress, Func<bool> cancel, out string error, out int errorCode)
+{
+    error = null;
+    errorCode = 0;
+    if (Environment.OSVersion.Platform != PlatformID.Win32NT)
+        return false;
+
+    long reported = 0;
+    CopyProgressRoutine routine = delegate(long totalFileSize, long totalBytesTransferred,
+        long streamSize, long streamBytesTransferred, uint streamNumber, uint callbackReason,
+        IntPtr sourceFile, IntPtr destinationFile, IntPtr data)
+    {
+        if (totalBytesTransferred > reported)
+        {
+            long delta = totalBytesTransferred - reported;
+            reported = totalBytesTransferred;
+            if (progress != null)
+                progress(delta);
+        }
+        if (cancel != null && cancel())
+            return 1;
+        return 0;
+    };
+
+    int cancelFlag = 0;
+    bool ok = CopyFileEx(source, target, routine, IntPtr.Zero, ref cancelFlag, CopyFileFailIfExists);
+    if (ok)
+    {
+        try
+        {
+            long length = new FileInfo(source).Length;
+            if (length > reported && progress != null)
+                progress(length - reported);
+        }
+        catch
+        {
+        }
+        return true;
+    }
+
+    errorCode = Marshal.GetLastWin32Error();
+    error = DescribeTransferError(errorCode);
+    return false;
+}
+
+private static bool CopyFileManaged(string source, string target, long length,
+    int bufferSize, bool preallocate, bool flushToDisk, Action<long> progress,
+    Func<bool> cancel, out string error, out int errorCode)
+{
+    error = null;
+    errorCode = 0;
+    FileStream input = null;
+    FileStream output = null;
+    try
+    {
+        input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read,
+            4096, FileOptions.SequentialScan);
+        output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+            4096, FileOptions.SequentialScan);
+
+        if (preallocate)
+        {
+            try { output.SetLength(length); }
+            catch { }
+        }
+
+        byte[] buffer = new byte[bufferSize];
+        while (true)
+        {
+            if (cancel != null && cancel())
+            {
+                error = "已取消";
+                return false;
+            }
+            int read = input.Read(buffer, 0, buffer.Length);
+            if (read <= 0)
+                break;
+            output.Write(buffer, 0, read);
+            if (progress != null)
+                progress(read);
+        }
+
+        if (flushToDisk)
+            output.Flush(true);
+        else
+            output.Flush();
+
+        input.Close();
+        input = null;
+        output.Close();
+        output = null;
+        CopyFileTimestamps(source, target);
+        return true;
+    }
+    catch (Exception ex)
+    {
+        errorCode = GetTransferErrorCode(ex);
+        error = DescribeTransferException(ex, errorCode);
+        return false;
+    }
+    finally
+    {
+        if (input != null)
+        {
+            try { input.Dispose(); }
+            catch { }
+        }
+        if (output != null)
+        {
+            try { output.Dispose(); }
+            catch { }
+        }
+    }
+}
+
+private static void CopyFileTimestamps(string source, string target)
+{
+    try { File.SetCreationTimeUtc(target, File.GetCreationTimeUtc(source)); }
+    catch { }
+    try { File.SetLastWriteTimeUtc(target, File.GetLastWriteTimeUtc(source)); }
+    catch { }
+    try { File.SetAttributes(target, File.GetAttributes(source)); }
+    catch { }
+}
+
+private static string BuildTransferTempPath(string target)
+{
+    string directory = null;
+    try { directory = Path.GetDirectoryName(target); }
+    catch { }
+    string name = ".qk-" + Guid.NewGuid().ToString("N").Substring(0, 12) + ".tmp";
+    if (string.IsNullOrEmpty(directory))
+        return name;
+    return Path.Combine(directory, name);
+}
+
+private static bool IsNativeFallbackError(int errorCode)
+{
+    return errorCode == 1 || errorCode == 50 || errorCode == 120;
+}
+
+private static int GetTransferErrorCode(Exception ex)
+{
+    try
+    {
+        if (ex is UnauthorizedAccessException)
+            return 5;
+        if (ex is FileNotFoundException)
+            return 2;
+        if (ex is DirectoryNotFoundException)
+            return 3;
+        if (ex is PathTooLongException)
+            return 206;
+        if (ex is IOException)
+        {
+            int hr = Marshal.GetHRForException(ex);
+            int code = hr & 0xFFFF;
+            if (code != 0)
+                return code;
+        }
+    }
+    catch
+    {
+    }
+    return 0;
+}
+
+private static string DescribeTransferException(Exception ex, int errorCode)
+{
+    if (errorCode != 0)
+        return DescribeTransferError(errorCode);
+    return ex == null || ex.Message == null || ex.Message.Length == 0
+        ? "文件操作失败" : ex.Message;
+}
+
+private static void TryDeleteFile(string path)
+{
+    if (path == null)
+        return;
+    try
+    {
+        if (File.Exists(path))
+        {
+            try { File.SetAttributes(path, FileAttributes.Normal); }
+            catch { }
+            File.Delete(path);
+        }
+    }
+    catch
+    {
+    }
 }
 
 public static bool ShouldSkipByFilter(string extension, string extensions, string mode)
@@ -1355,7 +1948,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.05
+// 版本：0.05.3
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -4143,15 +4736,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
     string action = Convert.ToString(item["Action"], CultureInfo.InvariantCulture);
     string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
     string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
-    long size = 0;
-    try
-    {
-        size = Convert.ToInt64(item["Size"], CultureInfo.InvariantCulture);
-    }
-    catch
-    {
-        size = 0;
-    }
 
     try
     {
@@ -4195,43 +4779,72 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
             }
         }
 
+        Action<long> progress = delegate(long delta)
+        {
+            if (delta != 0)
+                Interlocked.Add(ref _execBytes, delta);
+        };
+
         if (action == "复制")
         {
-            File.Copy(source, target, false);
-            Interlocked.Add(ref _execBytes, size);
-            if (verify)
-                VerifyExecutedFile(target, verificationSourceHash);
+            string copyError;
+            if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+                throw new IOException(copyError);
+            try
+            {
+                if (verify)
+                    VerifyExecutedFile(target, verificationSourceHash);
+            }
+            catch
+            {
+                // 复制后校验失败时删除未通过校验的目标文件；源文件保持不变。
+                TryDeleteTargetFile(target);
+                throw;
+            }
         }
         else if (action == "移动")
         {
-            bool crossVolume = !IsSameVolume(source, target);
+            bool crossVolume = !IsSameVolumePath(source, target);
             if (crossVolume)
             {
-                File.Copy(source, target, false);
-                if (verify)
-                    VerifyExecutedFile(target, verificationSourceHash);
+                string copyError;
+                if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+                    throw new IOException(copyError);
+                try
+                {
+                    if (verify)
+                        VerifyExecutedFile(target, verificationSourceHash);
+                }
+                catch
+                {
+                    // 跨卷移动在删除源文件前校验；失败时删除目标，保留源文件。
+                    TryDeleteTargetFile(target);
+                    throw;
+                }
                 try
                 {
                     File.Delete(source);
                 }
                 catch
                 {
-                    try { File.Delete(target); }
-                    catch { }
+                    TryDeleteTargetFile(target);
                     throw new IOException("跨卷移动失败：无法删除源文件");
                 }
-                Interlocked.Add(ref _execBytes, size);
             }
             else
             {
-                File.Move(source, target);
+                string moveError;
+                if (!MoveFileWithRetry(source, target, 3, out moveError))
+                    throw new IOException(moveError);
                 if (verify)
                     VerifyExecutedFile(target, verificationSourceHash);
             }
         }
         else if (action == "重命名")
         {
-            File.Move(source, target);
+            string moveError;
+            if (!MoveFileWithRetry(source, target, 3, out moveError))
+                throw new IOException(moveError);
         }
         else
         {
@@ -4247,14 +4860,6 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         Interlocked.Increment(ref _execErrors);
         ReportExecutionRow(item, false, ex.Message, "执行失败");
     }
-}
-
-private static bool IsSameVolume(string source, string target)
-{
-    string sourceRoot = Path.GetPathRoot(source);
-    string targetRoot = Path.GetPathRoot(target);
-    return string.Equals(sourceRoot == null ? "" : sourceRoot,
-        targetRoot == null ? "" : targetRoot, StringComparison.OrdinalIgnoreCase);
 }
 
 private static void VerifyExecutedFile(string target, string expectedHash)
@@ -4275,6 +4880,24 @@ private static void VerifyExecutedFile(string target, string expectedHash)
     string fileName = Path.GetFileName(target);
     if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
         throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+}
+
+private static void TryDeleteTargetFile(string path)
+{
+    if (path == null)
+        return;
+    try
+    {
+        if (File.Exists(path))
+        {
+            try { File.SetAttributes(path, FileAttributes.Normal); }
+            catch { }
+            File.Delete(path);
+        }
+    }
+    catch
+    {
+    }
 }
 
 private static void ReportExecutionRow(Dictionary<string, object> item, bool success,
