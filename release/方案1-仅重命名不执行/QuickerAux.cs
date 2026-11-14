@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.7
+// 版本：0.06.8
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -30,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.7
+// 版本：0.06.8
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -55,6 +55,7 @@ public static readonly string[] TemplateTokens = new string[] {
     "【源文件名】", "【扩展名】", "【校验码】"
 };
 
+// 左侧要求非数字边界；右侧允许数字，兼容“日期+序号”紧邻的命名（如202002021）。
 private static readonly Regex FilenameDate1Regex =
     new Regex(@"(?<!\d)(\d{4})-(\d{2})-(\d{2})", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 private static readonly Regex FilenameDate2Regex =
@@ -84,6 +85,8 @@ private const uint Blake3Root = 8U;
 [ThreadStatic] private static uint[] _blake3LastBlock;
 [ThreadStatic] private static uint[] _blake3Cv;
 [ThreadStatic] private static uint[] _blake3Output;
+[ThreadStatic] private static byte[] _blake3Chunk;
+[ThreadStatic] private static byte[] _blake3ReadBuffer;
 
 private static void EnsureBlake3Scratch()
 {
@@ -96,6 +99,8 @@ private static void EnsureBlake3Scratch()
     _blake3LastBlock = new uint[16];
     _blake3Cv = new uint[8];
     _blake3Output = new uint[16];
+    _blake3Chunk = new byte[1024];
+    _blake3ReadBuffer = new byte[81920];
 }
 
 private static uint[] _crc32Table = null;
@@ -140,15 +145,9 @@ public static int GetAlgorithmMaxDigits(string algorithm)
 
 public static string NormalizeDateSource(string source)
 {
-    string value = (source == null ? "" : source.Trim()).ToLowerInvariant();
-    if (value == "filename" || value == "file" || value == "文件名" || value == "文件名中的日期")
-        return "filename";
-    if (value == "exif" || value == "exif拍摄日期" || value == "拍摄日期")
-        return "exif";
-    if (value == "modified" || value == "修改日期")
-        return "modified";
-    if (value == "created" || value == "创建日期")
-        return "created";
+    string value;
+    if (TryNormalizeDateSource(source, out value))
+        return value;
     return "filename";
 }
 
@@ -506,10 +505,44 @@ public static string DescribeTransferProfile(string path, long fileSize)
 
 public static bool IsSameVolumePath(string source, string target)
 {
-    string sourceRoot = Path.GetPathRoot(source);
-    string targetRoot = Path.GetPathRoot(target);
-    return string.Equals(sourceRoot == null ? "" : sourceRoot,
-        targetRoot == null ? "" : targetRoot, StringComparison.OrdinalIgnoreCase);
+    return string.Equals(GetVolumeRoot(source), GetVolumeRoot(target),
+        StringComparison.OrdinalIgnoreCase);
+}
+
+// 显式识别盘符与UNC共享；避免非Windows宿主上Path.GetPathRoot返回空串导致误判。
+private static string GetVolumeRoot(string path)
+{
+    if (path == null)
+        return "";
+    string value = path.Trim();
+    if (value.Length >= 2 &&
+        ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) &&
+        value[1] == ':')
+    {
+        return char.ToUpperInvariant(value[0]).ToString() + ":";
+    }
+    if (value.Length >= 2 &&
+        ((value[0] == '\\' && value[1] == '\\') || (value[0] == '/' && value[1] == '/')))
+    {
+        int serverEnd = value.IndexOfAny(new char[] { '\\', '/' }, 2);
+        if (serverEnd < 0)
+            return value.ToUpperInvariant();
+        int shareEnd = value.IndexOfAny(new char[] { '\\', '/' }, serverEnd + 1);
+        string server = value.Substring(2, serverEnd - 2);
+        string share = shareEnd < 0
+            ? value.Substring(serverEnd + 1)
+            : value.Substring(serverEnd + 1, shareEnd - serverEnd - 1);
+        return ("\\\\" + server + "\\" + share).ToUpperInvariant();
+    }
+    try
+    {
+        string root = Path.GetPathRoot(value);
+        return root == null ? "" : root;
+    }
+    catch
+    {
+        return "";
+    }
 }
 
 public static bool IsFileUnchanged(string path, long expectedLength, DateTime expectedLastWriteUtc)
@@ -548,8 +581,10 @@ public static bool CheckFreeSpace(string targetPath, long requiredBytes, out str
         long reserve = Math.Max(32L * 1024 * 1024, requiredBytes / 100);
         if (available < reserve || requiredBytes > available - reserve)
         {
-            error = "目标磁盘空间不足：需要约 " +
-                ((requiredBytes + 1023) / 1024 / 1024).ToString(CultureInfo.InvariantCulture) +
+            long requiredMb = (requiredBytes + 1024L * 1024 - 1) / (1024L * 1024);
+            if (requiredMb < 1)
+                requiredMb = 1;
+            error = "目标磁盘空间不足：需要约 " + requiredMb.ToString(CultureInfo.InvariantCulture) +
                 " MB，可用 " + (available / 1024 / 1024).ToString(CultureInfo.InvariantCulture) + " MB";
             return false;
         }
@@ -609,6 +644,7 @@ public static string DescribeTransferError(int errorCode)
         case 112: return "磁盘空间不足";
         case 121: return "网络传输超时";
         case 123: return "文件名语法错误";
+        case 183: return "目标文件已存在";
         case 206: return "文件名或路径过长";
         case 1231: return "网络位置不可用";
         case 1235: return "操作已取消";
@@ -788,6 +824,27 @@ public static bool MoveFileWithRetry(string source, string target, int attempts,
     error = null;
     if (attempts < 1)
         attempts = 1;
+    if (source == null || source.Length == 0)
+    {
+        error = "源路径为空";
+        return false;
+    }
+    if (target == null || target.Length == 0)
+    {
+        error = "目标路径为空";
+        return false;
+    }
+    // 预检避免把“目标已存在”暴露成系统错误码 183。
+    if (!File.Exists(source))
+    {
+        error = "源文件不存在";
+        return false;
+    }
+    if (File.Exists(target))
+    {
+        error = "目标文件已存在";
+        return false;
+    }
 
     for (int attempt = 1; attempt <= attempts; attempt++)
     {
@@ -1132,14 +1189,23 @@ public static string GetDatePart(DateTime date, string token)
 // 校验码
 // ---------------------------------------------------------------------------
 
+// 位数统一钳制：最低1位，最高为算法摘要长度；未知算法按1位处理。
+public static int ClampChecksumDigits(string algorithm, int digits)
+{
+    int maxDigits = GetAlgorithmMaxDigits(algorithm);
+    if (maxDigits <= 0) maxDigits = 1;
+    if (digits < 1) return 1;
+    if (digits > maxDigits) return maxDigits;
+    return digits;
+}
+
 public static string GetAlgorithmLabel(string algorithm, int digits)
 {
     string value = NormalizeAlgorithm(algorithm);
     int maxDigits = GetAlgorithmMaxDigits(value);
-    int actualDigits = digits;
-    if (maxDigits <= 0) maxDigits = 1;
-    if (actualDigits < 1) actualDigits = 1;
-    if (actualDigits > maxDigits) actualDigits = maxDigits;
+    if (maxDigits <= 0)
+        return value;
+    int actualDigits = ClampChecksumDigits(value, digits);
     if (actualDigits == maxDigits)
         return value;
     return value + "_" + actualDigits.ToString(CultureInfo.InvariantCulture);
@@ -1158,32 +1224,22 @@ public static string TruncateHash(string hex, int digits)
 public static string BuildChecksumBadge(string algorithm, int digits, string prefix, string suffix, string hex)
 {
     string value = NormalizeAlgorithm(algorithm);
-    int maxDigits = GetAlgorithmMaxDigits(value);
-    int actualDigits = digits;
-    if (maxDigits <= 0) maxDigits = 1;
-    if (actualDigits < 1) actualDigits = 1;
-    if (actualDigits > maxDigits) actualDigits = maxDigits;
-
-    string label = GetAlgorithmLabel(value, actualDigits);
-    string code = TruncateHash(hex, actualDigits);
-    string left = (prefix == null ? "" : prefix);
-    string right = (suffix == null ? "" : suffix);
-    return left + label + "-" + code + right;
+    int actualDigits = ClampChecksumDigits(value, digits);
+    return ComposeChecksumBadge(value, actualDigits, prefix, suffix, TruncateHash(hex, actualDigits));
 }
 
 public static string BuildPendingChecksumBadge(string algorithm, int digits, string prefix, string suffix)
 {
     string value = NormalizeAlgorithm(algorithm);
-    int maxDigits = GetAlgorithmMaxDigits(value);
-    int actualDigits = digits;
-    if (maxDigits <= 0) maxDigits = 1;
-    if (actualDigits < 1) actualDigits = 1;
-    if (actualDigits > maxDigits) actualDigits = maxDigits;
+    int actualDigits = ClampChecksumDigits(value, digits);
+    return ComposeChecksumBadge(value, actualDigits, prefix, suffix, "…");
+}
 
-    string label = GetAlgorithmLabel(value, actualDigits);
-    string left = (prefix == null ? "" : prefix);
-    string right = (suffix == null ? "" : suffix);
-    return left + label + "-…" + right;
+private static string ComposeChecksumBadge(string algorithm, int digits, string prefix, string suffix, string code)
+{
+    string left = prefix == null ? "" : prefix;
+    string right = suffix == null ? "" : suffix;
+    return left + GetAlgorithmLabel(algorithm, digits) + "-" + code + right;
 }
 
 public static string ComputeHashHex(string filePath, string algorithm, out string error)
@@ -1314,11 +1370,11 @@ private static string ToHex(byte[] data)
 private static string ComputeBlake3Hex(Stream stream)
 {
     EnsureBlake3Scratch();
-    byte[] chunk = new byte[1024];
+    byte[] chunk = _blake3Chunk;
     int chunkLength = 0;
     ulong chunkCounter = 0;
     List<uint[]> stack = new List<uint[]>();
-    byte[] readBuffer = new byte[81920];
+    byte[] readBuffer = _blake3ReadBuffer;
     int read;
 
     while ((read = stream.Read(readBuffer, 0, readBuffer.Length)) > 0)
@@ -1614,6 +1670,15 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
     string missingDateText, string baseName, string extension, string checksumBadge,
     out string targetPath, out string error)
 {
+    return TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
+        baseName, extension, checksumBadge, null, out targetPath, out error);
+}
+
+// 批量预览时传入可复用的 values 缓冲区，避免每个文件重新分配模板词典。
+public static bool TryBuildTargetPath(string template, string rootDirectory, DateTime? effectiveDate,
+    string missingDateText, string baseName, string extension, string checksumBadge,
+    IDictionary<string, string> values, out string targetPath, out string error)
+{
     targetPath = null;
     error = null;
 
@@ -1649,7 +1714,8 @@ public static bool TryBuildTargetPath(string template, string rootDirectory, Dat
         dateDay = dateYear;
     }
 
-    Dictionary<string, string> values = new Dictionary<string, string>(StringComparer.Ordinal);
+    if (values == null)
+        values = new Dictionary<string, string>(StringComparer.Ordinal);
     values["【日期yyyy】"] = dateYear;
     values["【日期mm】"] = dateMonth;
     values["【日期dd】"] = dateDay;
@@ -1991,10 +2057,7 @@ public static void NormalizeConfig(Dictionary<string, string> config)
     int digits;
     if (!int.TryParse(GetConfigString(config, "checksumDigits", "8"), NumberStyles.Integer, CultureInfo.InvariantCulture, out digits))
         digits = GetAlgorithmMaxDigits(algorithm);
-    int maxDigits = GetAlgorithmMaxDigits(algorithm);
-    if (digits < 1) digits = 1;
-    if (digits > maxDigits) digits = maxDigits;
-    config["checksumDigits"] = digits.ToString(CultureInfo.InvariantCulture);
+    config["checksumDigits"] = ClampChecksumDigits(algorithm, digits).ToString(CultureInfo.InvariantCulture);
 
     config["checksumPrefix"] = GetConfigString(config, "checksumPrefix", "[");
     config["checksumSuffix"] = GetConfigString(config, "checksumSuffix", "]");
@@ -2023,17 +2086,13 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
     bool applied = false;
     bool templateApplied = false;
-    string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear",
-        "filterExtensions", "filterMode",
-        "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
-        "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
-        "preferExifOnFilenameConflict",
-        "realTimePreview", "checksumAlgorithm", "checksumDigits",
-        "execParallel", "execVerify",
-        "checksumPrefix", "checksumSuffix", "template"
-    };
-    for (int i = 0; i < keys.Length; i++)
+    // 以公共配置键为基准，再补入旧版本兼容键，避免两处键表漂移。
+    List<string> keys = new List<string>(PresetConfigKeys);
+    keys.Add("dateFallback5Text");
+    keys.Add("dateFallbackEnabled");
+    keys.Add("dateMissingMode");
+    keys.Add("dateMissingText");
+    for (int i = 0; i < keys.Count; i++)
     {
         object raw;
         if (!preset.TryGetValue(keys[i], out raw) || raw == null)
@@ -2368,7 +2427,7 @@ public static bool TryParseJson(string text, out object value)
     int index = 0;
     try
     {
-        value = ParseJsonValue(trimmed, ref index);
+        value = ParseJsonValue(trimmed, ref index, 0);
         SkipJsonWhitespace(trimmed, ref index);
         return index == trimmed.Length;
     }
@@ -2379,17 +2438,22 @@ public static bool TryParseJson(string text, out object value)
     }
 }
 
-private static object ParseJsonValue(string text, ref int index)
+// 限制嵌套深度，避免恶意或损坏的状态JSON造成栈溢出。
+private const int MaxJsonDepth = 64;
+
+private static object ParseJsonValue(string text, ref int index, int depth)
 {
+    if (depth > MaxJsonDepth)
+        throw new FormatException("JSON嵌套层级过深。");
     SkipJsonWhitespace(text, ref index);
     if (index >= text.Length)
         throw new FormatException("JSON意外结束。");
 
     char ch = text[index];
     if (ch == '{')
-        return ParseJsonObject(text, ref index);
+        return ParseJsonObject(text, ref index, depth + 1);
     if (ch == '[')
-        return ParseJsonArray(text, ref index);
+        return ParseJsonArray(text, ref index, depth + 1);
     if (ch == '"')
         return ParseJsonString(text, ref index);
     if (ch == 't')
@@ -2410,7 +2474,7 @@ private static object ParseJsonValue(string text, ref int index)
     return ParseJsonNumber(text, ref index);
 }
 
-private static Dictionary<string, object> ParseJsonObject(string text, ref int index)
+private static Dictionary<string, object> ParseJsonObject(string text, ref int index, int depth)
 {
     Dictionary<string, object> result =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
@@ -2435,7 +2499,7 @@ private static Dictionary<string, object> ParseJsonObject(string text, ref int i
             throw new FormatException("JSON对象缺少冒号。");
 
         index++;
-        result[key] = ParseJsonValue(text, ref index);
+        result[key] = ParseJsonValue(text, ref index, depth);
         SkipJsonWhitespace(text, ref index);
         if (index >= text.Length)
             throw new FormatException("JSON对象未结束。");
@@ -2454,7 +2518,7 @@ private static Dictionary<string, object> ParseJsonObject(string text, ref int i
     }
 }
 
-private static List<object> ParseJsonArray(string text, ref int index)
+private static List<object> ParseJsonArray(string text, ref int index, int depth)
 {
     List<object> result = new List<object>();
     index++;
@@ -2468,7 +2532,7 @@ private static List<object> ParseJsonArray(string text, ref int index)
 
     while (true)
     {
-        result.Add(ParseJsonValue(text, ref index));
+        result.Add(ParseJsonValue(text, ref index, depth));
         SkipJsonWhitespace(text, ref index);
         if (index >= text.Length)
             throw new FormatException("JSON数组未结束。");
@@ -2575,7 +2639,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.7
+// 版本：0.06.8
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2640,6 +2704,7 @@ private static Dictionary<string, string> _hashCache = new Dictionary<string, st
 
 private static readonly object _hashLock = new object();
 private static readonly Regex EditorTokenRegex = new Regex("【[^】]*】", RegexOptions.Compiled);
+private const string HashErrorSentinel = "!ERR";
 
 // 模板是否包含【校验码】的结果缓存：模板不变时避免每行重复执行正则。
 private static string _templateHashCheckKey = null;
@@ -2679,6 +2744,7 @@ private static readonly object _execRowLock = new object();
 private static bool _execUiDirty = false;
 private static readonly object _execDirLock = new object();
 private static readonly HashSet<string> _execDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+private static readonly Func<bool> ExecutionCancelCheck = delegate() { return _execStop; };
 private static string _execAlgorithm = "CRC32";
 private static int _execDigits = 8;
 private static string _execPrefix = "";
@@ -2824,6 +2890,8 @@ private static void ResetRuntimeState()
     _skippedInvalid = 0;
     _lastCaret = null;
     _previewDirty = false;
+    _templateHashCheckKey = null;
+    _templateHashCheckValue = false;
     _suppressPresetSelection = false;
     _suppressEvents = false;
     _suppressEditor = false;
@@ -3316,9 +3384,7 @@ private static void DigitsText_LostFocus(object sender, RoutedEventArgs e)
     int digits;
     if (!int.TryParse(_digitsText.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out digits))
         digits = GetConfigInt(_config, "checksumDigits", 8);
-    int max = GetAlgorithmMaxDigits(_config["checksumAlgorithm"]);
-    if (digits < 1) digits = 1;
-    if (digits > max) digits = max;
+    digits = ClampChecksumDigits(_config["checksumAlgorithm"], digits);
     _digitsText.Text = digits.ToString(CultureInfo.InvariantCulture);
     ApplyUiConfig();
 }
@@ -3373,29 +3439,7 @@ private static void ApplyUiConfig()
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
     bool oldNeedsHash = TemplateNeedsHash(GetConfigString(_config, "template", DefaultTemplate));
 
-    ReadConfigFromUi();
-
-    string newAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
-    if (newAlgorithm != NormalizeAlgorithm(oldAlgorithm))
-    {
-        int oldMax = GetAlgorithmMaxDigits(oldAlgorithm);
-        int newMax = GetAlgorithmMaxDigits(newAlgorithm);
-        if (oldDigits == oldMax)
-            _config["checksumDigits"] = newMax.ToString(CultureInfo.InvariantCulture);
-    }
-
-    NormalizeConfig(_config);
-    _suppressEvents = true;
-    SyncFallbackCombosFromConfig();
-    _suppressEvents = false;
-
-    UpdateChecksumBadge();
-    UpdateRootPathText();
-    UpdateFallbackUiState();
-    UpdateRealTimeUi();
-
-    if (!_digitsText.IsKeyboardFocusWithin)
-        _digitsText.Text = _config["checksumDigits"];
+    AbsorbConfigFromUi(oldAlgorithm, oldDigits);
 
     if (_scanning)
         return;
@@ -3420,7 +3464,7 @@ private static void ApplyUiConfig()
     if (realTimeChanged && realTime)
     {
         _previewDirty = false;
-        RefreshFilenameDates(true);
+        RefreshDates(true, true);
         return;
     }
 
@@ -3429,15 +3473,15 @@ private static void ApplyUiConfig()
         if (realTimeChanged)
         {
             _previewDirty = false;
-            RefreshFilenameDates(true);
+            RefreshDates(true, true);
             return;
         }
 
         _previewDirty = true;
         if (startChanged)
-            RefreshFilenameDates(false);
+            RefreshDates(true, false);
         else if (dateChanged || fallbackChanged || preferExifChanged)
-            RefreshEffectiveDates(false);
+            RefreshDates(false, false);
         RefreshErrorBanner("");
         UpdateStatus();
         return;
@@ -3445,46 +3489,54 @@ private static void ApplyUiConfig()
 
     _previewDirty = false;
     if (startChanged)
-        RefreshFilenameDates(true);
+        RefreshDates(true, true);
     else if (dateChanged || fallbackChanged || preferExifChanged)
-        RefreshEffectiveDates(true);
+        RefreshDates(false, true);
     else
         RecomputeAll();
 }
 
-private static void RefreshFilenameDates(bool recomputeTarget)
+// 统一从控件吸收配置：位数联动、规范化、下拉同步与徽标刷新共享同一套逻辑。
+private static void AbsorbConfigFromUi(string oldAlgorithm, int oldDigits)
 {
-    int startYear = GetConfigInt(_config, "startYear", 2000);
-    for (int i = 0; i < _files.Count; i++)
+    ReadConfigFromUi();
+
+    string newAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
+    if (newAlgorithm != NormalizeAlgorithm(oldAlgorithm))
     {
-        Dictionary<string, object> item = _files[i];
-        DateTime parsed;
-        DateTime? fileDate = null;
-        if (TryExtractFilenameDate(Convert.ToString(item["FileName"], CultureInfo.InvariantCulture),
-            startYear, out parsed))
-            fileDate = parsed;
-        item["FileNameDate"] = fileDate;
-        UpdateEffectiveDate(item);
+        int oldMax = GetAlgorithmMaxDigits(oldAlgorithm);
+        int newMax = GetAlgorithmMaxDigits(newAlgorithm);
+        if (oldDigits == oldMax)
+            _config["checksumDigits"] = newMax.ToString(CultureInfo.InvariantCulture);
     }
 
-    if (recomputeTarget)
+    NormalizeConfig(_config);
+    _suppressEvents = true;
+    SyncFallbackCombosFromConfig();
+    _suppressEvents = false;
+
+    UpdateChecksumBadge();
+    UpdateRootPathText();
+    UpdateFallbackUiState();
+    UpdateRealTimeUi();
+
+    if (_digitsText != null && !_digitsText.IsKeyboardFocusWithin)
+        _digitsText.Text = _config["checksumDigits"];
+}
+
+// 合并“重算文件名日期”和“重算有效日期”两条几乎相同的路径。
+private static void RefreshDates(bool recomputeFilenameDates, bool recomputeTarget)
+{
+    if (recomputeFilenameDates)
     {
-        RecomputeAll();
+        for (int i = 0; i < _files.Count; i++)
+            UpdateRowDates(_files[i]);
     }
     else
     {
         for (int i = 0; i < _files.Count; i++)
-            RefreshRowDetails(_files[i]);
-        if (_grid != null)
-            _grid.Items.Refresh();
-        UpdateStatus();
+            UpdateEffectiveDate(_files[i]);
     }
-}
-
-private static void RefreshEffectiveDates(bool recomputeTarget)
-{
-    for (int i = 0; i < _files.Count; i++)
-        UpdateEffectiveDate(_files[i]);
 
     if (recomputeTarget)
     {
@@ -3679,9 +3731,7 @@ private static void FinishScan(int generation)
     if (_files.Count < expected)
         _skippedInvalid += (expected - _files.Count);
 
-    for (int i = 0; i < _files.Count; i++)
-        UpdateRowDates(_files[i]);
-
+    // 日期已在 AddFileBatch 中逐项计算，这里不再全量重复计算。
     _previewDirty = false;
     UpdateRealTimeUi();
     RecomputeAll();
@@ -3746,16 +3796,18 @@ private static void UpdateRowDates(Dictionary<string, object> item)
 
 private static string FormatSize(long size)
 {
+    if (size < 0)
+        size = 0;
     if (size < 1024)
         return size.ToString(CultureInfo.InvariantCulture) + " B";
     double value = size / 1024.0;
     if (value < 1024.0)
-        return value.ToString("0.0", CultureInfo.CurrentCulture) + " KB";
+        return value.ToString("0.0", CultureInfo.InvariantCulture) + " KB";
     value = value / 1024.0;
     if (value < 1024.0)
-        return value.ToString("0.0", CultureInfo.CurrentCulture) + " MB";
+        return value.ToString("0.0", CultureInfo.InvariantCulture) + " MB";
     value = value / 1024.0;
-    return value.ToString("0.0", CultureInfo.CurrentCulture) + " GB";
+    return value.ToString("0.0", CultureInfo.InvariantCulture) + " GB";
 }
 
 private static DateTime? TryReadExifDate(string path)
@@ -3942,7 +3994,7 @@ private static string GetCachedHash(string path, string algorithm, out bool isEr
         string value;
         if (!_hashCache.TryGetValue(HashKey(path, algorithm), out value))
             return null;
-        if (value == "!ERR")
+        if (value == HashErrorSentinel)
         {
             isError = true;
             return null;
@@ -3965,7 +4017,7 @@ private static void HashWorker(int generation, string algorithm, List<string> pa
             string hash = ComputeHashHex(paths[i], algorithm, out error);
             lock (_hashLock)
             {
-                _hashCache[HashKey(paths[i], algorithm)] = hash == null ? "!ERR" : hash;
+                _hashCache[HashKey(paths[i], algorithm)] = hash == null ? HashErrorSentinel : hash;
             }
 
             if (_hashStop || generation != _hashGeneration)
@@ -4042,8 +4094,10 @@ private static void RecomputeAll()
     bool customRootMissing = (rootMode == "custom" &&
         (customRoot == null || customRoot.Trim().Length == 0));
     string filterMode = _config["filterMode"];
-    string filterExtensions = _config["filterExtensions"];
-    bool hasFilter = filterExtensions != null && filterExtensions.Length > 0;
+    string filterExtensions = NormalizeExtensionList(_config["filterExtensions"]);
+    bool hasFilter = filterExtensions.Length > 0;
+    // 批次内复用同一模板词典，避免每个文件重复分配。
+    Dictionary<string, string> templateValues = new Dictionary<string, string>(StringComparer.Ordinal);
 
     // 第一遍：计算每个文件的动作和目标路径。
     for (int i = 0; i < _files.Count; i++)
@@ -4062,10 +4116,11 @@ private static void RecomputeAll()
 
         string itemExtension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
         bool extensionMatched = hasFilter && ExtensionMatchesFilter(itemExtension, filterExtensions);
-        bool filterSkip = ShouldSkipByFilter(itemExtension, filterExtensions, filterMode);
+        string action = ResolveAction(filterMode, extensionMatched, hasFilter, true);
+        bool filterSkip = action == "跳过";
         item["FilterSkipped"] = filterSkip;
         item["IsSkipped"] = filterSkip || GetBool(item, "DateSkipped");
-        item["Action"] = ResolveAction(filterMode, extensionMatched, hasFilter, true);
+        item["Action"] = action;
         if (GetBool(item, "IsSkipped"))
         {
             item["Action"] = "跳过";
@@ -4126,7 +4181,7 @@ private static void RecomputeAll()
         string target;
         string error;
         bool ok = TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
-            baseName, extension, checksum, out target, out error);
+            baseName, extension, checksum, templateValues, out target, out error);
 
         if (!ok)
         {
@@ -4149,12 +4204,12 @@ private static void RecomputeAll()
         }
         bool sameDirectory = string.Equals(sourceDir == null ? "" : sourceDir.TrimEnd('\\'),
             targetDir == null ? "" : targetDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
-        string action = ResolveAction(filterMode, extensionMatched, hasFilter, sameDirectory);
-        item["Action"] = action;
-        if ((action == "复制" || action == "移动") &&
+        string finalAction = ResolveAction(filterMode, extensionMatched, hasFilter, sameDirectory);
+        item["Action"] = finalAction;
+        if ((finalAction == "复制" || finalAction == "移动") &&
             string.Equals(sourcePath, target, StringComparison.OrdinalIgnoreCase))
         {
-            SetRowError(item, "目标路径与源路径相同，无法执行" + action, "路径错误");
+            SetRowError(item, "目标路径与源路径相同，无法执行" + finalAction, "路径错误");
             continue;
         }
 
@@ -4592,30 +4647,10 @@ private static void RefreshPreviewNow()
 
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
-    ReadConfigFromUi();
-    string newAlgorithm = NormalizeAlgorithm(_config["checksumAlgorithm"]);
-    if (newAlgorithm != NormalizeAlgorithm(oldAlgorithm))
-    {
-        int oldMax = GetAlgorithmMaxDigits(oldAlgorithm);
-        int newMax = GetAlgorithmMaxDigits(newAlgorithm);
-        if (oldDigits == oldMax)
-            _config["checksumDigits"] = newMax.ToString(CultureInfo.InvariantCulture);
-    }
-    NormalizeConfig(_config);
-
-    _suppressEvents = true;
-    SyncFallbackCombosFromConfig();
-    _suppressEvents = false;
-
-    UpdateChecksumBadge();
-    UpdateRootPathText();
-    UpdateFallbackUiState();
-    UpdateRealTimeUi();
-    if (!_digitsText.IsKeyboardFocusWithin)
-        _digitsText.Text = _config["checksumDigits"];
+    AbsorbConfigFromUi(oldAlgorithm, oldDigits);
 
     _previewDirty = false;
-    RefreshFilenameDates(true);
+    RefreshDates(true, true);
 }
 
 private static void LoadPreset_Click(object sender, RoutedEventArgs e)
@@ -4690,7 +4725,7 @@ private static void LoadPresetByName(string name)
         return;
     }
     _previewDirty = false;
-    RefreshFilenameDates(true);
+    RefreshDates(true, true);
     _statusText.Text = "已载入预设：" + actualName;
 }
 
@@ -4874,7 +4909,13 @@ private static void SaveExtensionPresetStore(Dictionary<string, string> store)
 
 private static string FindExtensionPresetKey(Dictionary<string, string> store, string name)
 {
-    foreach (string key in store.Keys)
+    return FindKeyIgnoreCase(store.Keys, name);
+}
+
+// 主预设与扩展名预设共用大小写不敏感的键查找。
+private static string FindKeyIgnoreCase(IEnumerable<string> keys, string name)
+{
+    foreach (string key in keys)
     {
         if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
             return key;
@@ -4969,36 +5010,58 @@ private static void NormalizePresetVariable(string key)
         _data[key] = parsed;
 }
 
-private static bool TryGetActionVariable(string variableName, out object value)
+// 汇总可访问的变量上下文：窗口上下文、Context、根上下文。
+private static List<object> GetActionVariableTargets()
 {
-    value = null;
-    if (_winContext == null || variableName == null)
-        return false;
+    List<object> targets = new List<object>();
+    if (_winContext == null)
+        return targets;
+    targets.Add(_winContext);
     try
     {
-        object target = _winContext;
-        if (TryGetVarValue(target, variableName, out value))
-            return true;
-
-        PropertyInfo contextProperty = target.GetType().GetProperty("Context");
+        PropertyInfo contextProperty = _winContext.GetType().GetProperty("Context");
         if (contextProperty == null)
-            return false;
-        object context = contextProperty.GetValue(target, null);
+            return targets;
+        object context = contextProperty.GetValue(_winContext, null);
         if (context == null)
-            return false;
-        if (TryGetVarValue(context, variableName, out value))
-            return true;
+            return targets;
+        targets.Add(context);
 
         MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
-        if (rootMethod == null)
-            return false;
-        object root = rootMethod.Invoke(context, null);
-        return TryGetVarValue(root, variableName, out value);
+        if (rootMethod != null)
+        {
+            object root = rootMethod.Invoke(context, null);
+            if (root != null)
+                targets.Add(root);
+        }
     }
     catch
     {
-        return false;
+        // 上下文反射失败时保留已收集的目标。
     }
+    return targets;
+}
+
+private static bool TryGetActionVariable(string variableName, out object value)
+{
+    value = null;
+    if (variableName == null)
+        return false;
+    List<object> targets = GetActionVariableTargets();
+    for (int i = 0; i < targets.Count; i++)
+    {
+        try
+        {
+            if (TryGetVarValue(targets[i], variableName, out value))
+                return true;
+        }
+        catch
+        {
+            // 单个上下文不可读时继续尝试下一级。
+        }
+    }
+    value = null;
+    return false;
 }
 
 private static bool TryGetVarValue(object target, string variableName, out object value)
@@ -5035,35 +5098,13 @@ private static MethodInfo FindVariableMethod(object target, string methodName, T
 
 private static void PublishActionVariable(string variableName, object value)
 {
-    if (_winContext == null || variableName == null)
+    if (variableName == null)
         return;
     // 不同版本可能直接提供 SetVarValue，或通过 Context / GetRootContext 暴露。
     // 逐级尝试所有可用上下文，避免只写入步骤局部作用域而动作根变量仍是旧值。
-    TryPublishTo(_winContext, variableName, value);
-
-    try
-    {
-        PropertyInfo contextProperty = _winContext.GetType().GetProperty("Context");
-        if (contextProperty == null)
-            return;
-
-        object context = contextProperty.GetValue(_winContext, null);
-        if (context == null)
-            return;
-
-        TryPublishTo(context, variableName, value);
-
-        MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
-        if (rootMethod != null)
-        {
-            object root = rootMethod.Invoke(context, null);
-            TryPublishTo(root, variableName, value);
-        }
-    }
-    catch
-    {
-        // 实时写变量失败不影响窗口内保存结果，关闭时由数据映射写回。
-    }
+    List<object> targets = GetActionVariableTargets();
+    for (int i = 0; i < targets.Count; i++)
+        TryPublishTo(targets[i], variableName, value);
 }
 
 private static bool TryPublishTo(object target, string variableName, object value)
@@ -5151,30 +5192,16 @@ private static IDictionary<string, object> AsObjectDictionary(object value)
 
 private static string FindPresetKey(Dictionary<string, Dictionary<string, object>> store, string name)
 {
-    foreach (string key in store.Keys)
-    {
-        if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-            return key;
-    }
-    return null;
+    return FindKeyIgnoreCase(store.Keys, name);
 }
 
 private static string BuildPresetDiff(Dictionary<string, string> oldConfig,
     Dictionary<string, string> newConfig)
 {
-    string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear",
-        "filterExtensions", "filterMode",
-        "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
-        "preferExifOnFilenameConflict",
-        "realTimePreview", "checksumAlgorithm", "checksumDigits",
-        "checksumPrefix", "checksumSuffix", "template"
-    };
-
     StringBuilder builder = new StringBuilder();
-    for (int i = 0; i < keys.Length; i++)
+    for (int i = 0; i < PresetConfigKeys.Length; i++)
     {
-        string key = keys[i];
+        string key = PresetConfigKeys[i];
         string oldValue = GetConfigString(oldConfig, key, "");
         string newValue = GetConfigString(newConfig, key, "");
         if (oldValue == newValue)
@@ -5197,6 +5224,8 @@ private static string GetConfigLabel(string key)
     if (key == "dateFallbackCustomText") return "递补自定义值";
     if (key == "preferExifOnFilenameConflict") return "文件名日期与EXIF不一致时用EXIF";
     if (key == "realTimePreview") return "实时刷新";
+    if (key == "execParallel") return "并行执行数";
+    if (key == "execVerify") return "执行后校验";
     if (key == "checksumAlgorithm") return "校验算法";
     if (key == "checksumDigits") return "校验位数";
     if (key == "checksumPrefix") return "校验码前缀";
@@ -5216,6 +5245,8 @@ private static string FormatPresetValue(string key, string value)
     if (key == "filterMode")
         return value == "execute" ? "匹配时执行（白名单）" : "匹配时跳过";
     if (key == "realTimePreview")
+        return value == "true" ? "开启" : "关闭";
+    if (key == "execVerify")
         return value == "true" ? "开启" : "关闭";
     if (key == "preferExifOnFilenameConflict")
         return value == "true" ? "开启" : "关闭";
@@ -5639,7 +5670,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
         if (action == "复制")
         {
             string copyError;
-            if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+            if (!CopyFileWithRetry(source, target, progress, ExecutionCancelCheck, 3, out copyError))
                 throw new IOException(copyError);
             try
             {
@@ -5658,7 +5689,7 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
             if (crossVolume)
             {
                 string copyError;
-                if (!CopyFileWithRetry(source, target, progress, null, 3, out copyError))
+                if (!CopyFileWithRetry(source, target, progress, ExecutionCancelCheck, 3, out copyError))
                     throw new IOException(copyError);
                 try
                 {
@@ -5696,6 +5727,8 @@ private static void ExecuteOneFile(Dictionary<string, object> item)
             string moveError;
             if (!MoveFileWithRetry(source, target, 3, out moveError))
                 throw new IOException(moveError);
+            if (verify)
+                VerifyMovedFileName(item, target);
         }
         else
         {
@@ -5723,14 +5756,7 @@ private static void VerifyExecutedFile(string target, string expectedHash)
     if (!string.Equals(expectedHash, targetHash, StringComparison.OrdinalIgnoreCase))
         throw new IOException("执行后校验失败：目标文件校验码与源文件不一致");
 
-    if (!_execTemplateNeedsHash)
-        return;
-
-    string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
-        _execPrefix, _execSuffix, expectedHash);
-    string fileName = Path.GetFileName(target);
-    if (fileName == null || fileName.IndexOf(badge, StringComparison.OrdinalIgnoreCase) < 0)
-        throw new IOException("执行后校验失败：文件名中未找到校验码 " + badge);
+    EnsureChecksumInFileName(target, expectedHash);
 }
 
 // 同卷移动：内容未改变，仅校验目标文件名中的校验码。
@@ -5742,6 +5768,13 @@ private static void VerifyMovedFileName(Dictionary<string, object> item, string 
     if (expectedHash == null || expectedHash.Length == 0)
         return;
 
+    EnsureChecksumInFileName(target, expectedHash);
+}
+
+private static void EnsureChecksumInFileName(string target, string expectedHash)
+{
+    if (!_execTemplateNeedsHash)
+        return;
     string badge = BuildChecksumBadge(_execAlgorithm, _execDigits,
         _execPrefix, _execSuffix, expectedHash);
     string fileName = Path.GetFileName(target);
@@ -6023,7 +6056,7 @@ private static void Window_Closing(object sender, CancelEventArgs e)
         return;
 
     DialogResult answer = MessageBox.Show(
-        "正在执行文件操作。\n\n确定要停止并关闭窗口吗？\n已开始的文件操作会完成，尚未开始的项目不再执行。",
+        "正在执行文件操作。\n\n确定要停止并关闭窗口吗？\n正在进行的操作会尽快停止，尚未开始的项目不再执行。",
         "批量重命名器", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
     if (answer != DialogResult.Yes)
     {

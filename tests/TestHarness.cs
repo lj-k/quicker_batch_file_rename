@@ -842,6 +842,154 @@ public static class TestHarness
         Check(parsed.Count == 2, "ext preset: parse serialized store");
     }
 
+    // 第一性原理评审补充的边界与复用回归测试。
+    private static void TestCornerCases()
+    {
+        // 日期来源别名必须与递补解析使用同一套映射。
+        CheckEqual("modified", CoreUnderTest.NormalizeDateSource("修改"),
+            "corner: date source 修改 alias");
+        CheckEqual("created", CoreUnderTest.NormalizeDateSource("创建"),
+            "corner: date source 创建 alias");
+        CheckEqual("modified", CoreUnderTest.NormalizeDateSource(" 修改日期 "),
+            "corner: date source trims and lowercases");
+        CheckEqual("exif", CoreUnderTest.NormalizeDateSource("EXIF拍摄日期"),
+            "corner: date source EXIF alias");
+        CheckEqual("filename", CoreUnderTest.NormalizeDateSource("未知来源"),
+            "corner: date source unknown falls back to filename");
+
+        // 校验位数钳制在界面、配置和徽标三处必须一致。
+        CheckEqual(1, CoreUnderTest.ClampChecksumDigits("CRC32", 0),
+            "corner: digits zero clamps to 1");
+        CheckEqual(1, CoreUnderTest.ClampChecksumDigits("CRC32", -9),
+            "corner: digits negative clamps to 1");
+        CheckEqual(8, CoreUnderTest.ClampChecksumDigits("CRC32", 9),
+            "corner: digits above CRC32 max");
+        CheckEqual(64, CoreUnderTest.ClampChecksumDigits("sha256", 999),
+            "corner: digits above SHA-256 max");
+        CheckEqual(1, CoreUnderTest.ClampChecksumDigits("unknown", 5),
+            "corner: unknown algorithm clamps to 1");
+        CheckEqual("CRC32_4-…",
+            CoreUnderTest.BuildPendingChecksumBadge("CRC32", 4, null, null),
+            "corner: pending badge null affixes");
+        CheckEqual("MD5_4-aaaa",
+            CoreUnderTest.BuildChecksumBadge("MD5", 4, null, null, "aaaabbbb"),
+            "corner: badge null affixes");
+
+        // 扩展名列表去重、通配符与分隔符兼容。
+        CheckEqual("jpg;png", CoreUnderTest.NormalizeExtensionList("*.JPG; ..PNG | *.jpg"),
+            "corner: extension list dedupes and strips wildcards");
+        CheckEqual("", CoreUnderTest.NormalizeExtensionList(null),
+            "corner: extension list null is empty");
+        CheckEqual("*", CoreUnderTest.NormalizeExtensionList("*.*"),
+            "corner: extension list all wildcard");
+
+        // 配置与预设中的越界位数必须被规范化。
+        Dictionary<string, string> config = CoreUnderTest.CreateDefaultConfig(2000);
+        config["checksumDigits"] = "999";
+        CoreUnderTest.NormalizeConfig(config);
+        CheckEqual("8", config["checksumDigits"], "corner: config digits clamp high");
+        config["checksumDigits"] = "-5";
+        CoreUnderTest.NormalizeConfig(config);
+        CheckEqual("1", config["checksumDigits"], "corner: config digits clamp low");
+
+        config = CoreUnderTest.CreateDefaultConfig(2000);
+        Check(!CoreUnderTest.ApplyPresetDictionary(null, config),
+            "corner: null preset rejected");
+        Check(!CoreUnderTest.ApplyPresetDictionary(new Dictionary<string, object>(), config),
+            "corner: empty preset rejected");
+        Dictionary<string, object> preset = new Dictionary<string, object>();
+        preset["checksumDigits"] = "999";
+        Check(CoreUnderTest.ApplyPresetDictionary(preset, config),
+            "corner: preset with digits applies");
+        CheckEqual("8", config["checksumDigits"], "corner: preset digits clamped");
+
+        // 模板词典缓冲区复用时每次都必须覆盖全部键。
+        Dictionary<string, string> buffer = new Dictionary<string, string>();
+        string target;
+        string error;
+        Check(CoreUnderTest.TryBuildTargetPath("【根路径】/【源文件名】.【扩展名】", @"C:\root",
+            null, "", "a", "txt", "", buffer, out target, out error)
+            && target == @"C:\root\a.txt", "corner: reusable template buffer first call");
+        Check(CoreUnderTest.TryBuildTargetPath("【根路径】/【日期yyyy】-【源文件名】.【扩展名】", @"C:\root",
+            new DateTime(2021, 3, 4), "", "b", "txt", "", buffer, out target, out error)
+            && target == @"C:\root\2021-b.txt", "corner: reusable template buffer overwrites");
+        Check(buffer.Count == 7, "corner: reusable template buffer has 7 keys");
+
+        // JSON深度上限：深层嵌套必须失败而不是栈溢出。
+        StringBuilder deep = new StringBuilder();
+        for (int i = 0; i < 80; i++) deep.Append('[');
+        deep.Append('1');
+        for (int i = 0; i < 80; i++) deep.Append(']');
+        object parsed;
+        Check(!CoreUnderTest.TryParseJson(deep.ToString(), out parsed),
+            "corner: json depth limit rejects");
+        StringBuilder shallow = new StringBuilder();
+        for (int i = 0; i < 10; i++) shallow.Append('[');
+        shallow.Append('1');
+        for (int i = 0; i < 10; i++) shallow.Append(']');
+        Check(CoreUnderTest.TryParseJson(shallow.ToString(), out parsed),
+            "corner: json shallow nesting accepted");
+
+        // 传输错误码映射与目标已存在的友好提示。
+        CheckEqual("目标文件已存在", CoreUnderTest.DescribeTransferError(183),
+            "corner: transfer error 183 friendly");
+        CheckEqual("目标文件已存在", CoreUnderTest.DescribeTransferError(80),
+            "corner: transfer error 80 friendly");
+        Check(CoreUnderTest.IsTransientTransferError(32),
+            "corner: sharing violation is transient");
+        Check(!CoreUnderTest.IsTransientTransferError(2),
+            "corner: file not found is not transient");
+
+        string dir = Path.Combine(Path.GetTempPath(), "qk-corner-" + Guid.NewGuid().ToString("N"));
+        string source = Path.Combine(dir, "source.txt");
+        string existing = Path.Combine(dir, "existing.txt");
+        string missing = Path.Combine(dir, "missing.txt");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(source, "source");
+            File.WriteAllText(existing, "existing");
+
+            string moveError;
+            Check(!CoreUnderTest.MoveFileWithRetry(source, existing, 1, out moveError),
+                "corner: move rejects existing target");
+            CheckEqual("目标文件已存在", moveError, "corner: move existing target message");
+            Check(File.Exists(source), "corner: move keeps source on existing target");
+
+            Check(!CoreUnderTest.MoveFileWithRetry(missing, Path.Combine(dir, "x.txt"), 1, out moveError),
+                "corner: move rejects missing source");
+            CheckEqual("源文件不存在", moveError, "corner: move missing source message");
+
+            string copyError;
+            int copyCode;
+            Check(!CoreUnderTest.CopyFileAdaptive(source, existing, null, null,
+                out copyError, out copyCode), "corner: copy rejects existing target");
+            CheckEqual(80, copyCode, "corner: copy existing target code");
+
+            string spaceError;
+            Check(CoreUnderTest.CheckFreeSpace(Path.GetTempPath(), 0, out spaceError),
+                "corner: zero required space passes");
+            Check(CoreUnderTest.CheckFreeSpace(Path.GetTempPath(), -1, out spaceError),
+                "corner: negative required space passes");
+        }
+        finally
+        {
+            try { File.Delete(source); } catch { }
+            try { File.Delete(existing); } catch { }
+            try { Directory.Delete(dir, true); } catch { }
+        }
+
+        // 同卷判断：盘符大小写不敏感，不同盘符不同卷。
+        Check(CoreUnderTest.IsSameVolumePath(@"C:\a\1.txt", @"c:\b\2.txt"),
+            "corner: same drive case-insensitive");
+        Check(!CoreUnderTest.IsSameVolumePath(@"C:\a\1.txt", @"D:\b\2.txt"),
+            "corner: different drives");
+        Check(CoreUnderTest.IsSameVolumePath(@"\\server\share\a\1.txt", @"\\SERVER\SHARE\b\2.txt"),
+            "corner: same UNC share case-insensitive");
+        Check(!CoreUnderTest.IsSameVolumePath(@"\\server\share\1.txt", @"\\server\other\2.txt"),
+            "corner: different UNC shares");
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -859,6 +1007,7 @@ public static class TestHarness
         TestFlatPresetStore();
         TestPresetStructureCompatibility();
         TestExtensionPresetStore();
+        TestCornerCases();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
         return _failed == 0 ? 0 : 1;

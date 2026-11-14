@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.06.8] - 2026-11-14
+
+### Changed
+
+- 核心：`NormalizeDateSource` 改为复用 `TryNormalizeDateSource`，“修改/创建”别名在规范化与递补解析中保持一致；校验位数钳制收敛为 `ClampChecksumDigits`，界面、配置、徽标三处共用。
+- 核心：`BuildChecksumBadge` / `BuildPendingChecksumBadge` 共用徽标组装函数；预设写入与差异比较共用 `PresetConfigKeys` 键表，差异提示补充并行执行数与执行后校验。
+- 核心：模板渲染新增可复用词典重载，批量预览不再为每个文件分配模板词典；BLAKE3 的 1 KiB 分块与 80 KiB 读缓冲改为线程内复用。
+- 核心：`TryParseJson` 增加64层嵌套上限；`MoveFileWithRetry` 预检源/目标并友好返回“目标文件已存在”，错误码183同步映射；空间不足提示至少显示1 MB。
+- 核心：`IsSameVolumePath` 显式识别盘符与UNC共享，避免非Windows宿主上根路径为空导致误判。
+- 界面：配置吸收抽为 `AbsorbConfigFromUi`，`ApplyUiConfig` 与手动预览共用；`RefreshFilenameDates` / `RefreshEffectiveDates` 合并为 `RefreshDates`。
+- 界面：扫描完成后不再重复计算全部行日期；过滤器扩展名列表在每轮重算中只规范化一次，并复用同一次动作判定。
+- 界面：动作变量读取/写入共用上下文遍历；`FormatSize` 使用固定区域性并处理0/负值。
+- 执行：复制与跨卷移动接入取消检查，停止执行时在途复制会尽快中止并清理临时文件；同卷“重命名”纳入执行后文件名校验。
+
+### Added
+
+- 新增43项corner case测试：日期别名一致性、位数0/负数/越界、扩展名去重与通配符、空/越界预设、模板词典复用、JSON深度上限、传输错误码与目标冲突、零/负空间需求、盘符与UNC卷判断。
+
+### Verified
+
+- 核心测试 387 项通过，0 项失败；BLAKE3 官方 24 个向量全部通过。
+- 辅助 C# 按 C# 5 / .NET Framework 4.8 参考程序集编译通过。
+- 两套 release 重新生成；XAML 解析、控件命名与版本一致性校验通过。
+
 ## [0.06.7] - 2026-11-14
 
 ### Changed
