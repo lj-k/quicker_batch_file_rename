@@ -1,0 +1,3504 @@
+<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'><title>Quicker 结构化调试报告</title>
+<meta name='quicker-snapshot-hash' content='f7d66ef4982aec6529196e10345648ffc2fa0c20cab287e03eff49d4f4add048'>
+<style>/*
+ * Quicker 结构化调试查看器（修订 R：主从式诊断界面）样式。
+ * 布局：顶栏工具条 + 横幅 + 主体（左执行树 | 拖动分隔条 | 右步骤详情）。
+ * 观感【复用】方案 A / 旧静态渲染器 StyleBlock 的配色与字体（灰阶 + chocolate 警告 + red 错误 + step-id 橙 #e3a664），
+ * 但布局与交互按主从式重写。左树为单行行高固定的虚拟列表；右详情面板完整展示值（不再截断/不再 tooltip 展开）。
+ *
+ * 主题（暗色模式，默认跟随系统）：
+ *  - 所有会随主题变化的颜色都抽成 :root 上的语义 CSS 自定义属性（--bg / --fg / --panel-bg / --border / --muted /
+ *    --accent / --error / --warning / --stepid / --select-bg …），各处只引用变量，亮色值 == 原有硬编码值（观感不变）。
+ *  - 跟随系统：`@media (prefers-color-scheme: dark)` 提供暗色调色板；用 `:root:not([data-theme])` 限定，
+ *    仅在“跟随系统”（未设 data-theme）时生效。
+ *  - 手动优先：`:root[data-theme="dark"]` 覆写为暗色；手动选“浅色”时设 data-theme="light"，media 因 :not([data-theme]) 失效，
+ *    回落到 :root 亮色默认值。三态由工具条的主题下拉控制（见 viewer.js）。
+ */
+
+/* ---- 亮色调色板（默认；值即原有硬编码颜色，保证观感不变） ---- */
+:root {
+    color-scheme: light;        /* 让原生滚动条 / 下拉框等控件按主题渲染 */
+    --bg: #fff;                 /* 页面底色 */
+    --panel-bg: #fafafa;        /* 工具条 / 输入输出块底色 */
+    --input-bg: #fff;           /* 按钮 / 输入框 / 值块 / 分段控件底色 */
+    /* 工具栏按钮使用独立底色和轮廓，与输入框及工具栏背景区分。 */
+    --toolbar-button-bg: #e4ecf7;
+    --toolbar-button-fg: #203854;
+    --toolbar-button-border: #7186a1;
+    --toolbar-button-hover-bg: #d5e4f7;
+    --toolbar-button-hover-border: #497aaa;
+    --toolbar-button-active-bg: #bfd4ef;
+    --toolbar-button-disabled-bg: #f1f3f6;
+    --toolbar-button-disabled-fg: #9ba3ad;
+    --toolbar-button-disabled-border: #d7dde5;
+    --splitter-bg: #f0f0f0;     /* 分隔条 */
+    --hover-bg: #f6f6f6;        /* 树节点 hover */
+    --select-bg: #fdf1d6;       /* 选中节点底色 */
+
+    --fg: #555;                 /* 正文前景 */
+    --fg-strong: #333;          /* 强调（hover 文字等） */
+    --fg-heading: #444;         /* 标题 / 值文字 */
+    --muted: #999;              /* 次要说明文字 */
+    --muted-2: #888;            /* 更弱说明 / 占位 */
+    --dim: #b0b0b0;             /* 极弱（caret / 耗时 / 跳过图标 / null 值） */
+
+    --border: #e6e6e6;          /* 主边框 / 分隔线 */
+    --border-light: #eee;       /* 浅边框（小节线 / io 块边） */
+    --control-border: #cfcfcf;  /* 按钮 / 输入框边框 */
+    --sep: #ddd;                /* 竖向分隔条 */
+    --seg-border: #d5d5d5;      /* 分段控件外框 */
+    --seg-divider: #e2e2e2;     /* 分段控件按钮分隔 */
+
+    --accent: #f0a500;          /* 主强调橙（选中条 / hover / seg 选中 / 分隔条拖动） */
+    --accent-dark: #c07800;     /* 深强调橙（循环项值小节标题） */
+    --on-accent: #fff;          /* 强调底上的文字 */
+    --link: #2a72c0;            /* 链接 */
+
+    --error: #c0392b;           /* 错误红（失败文案 / 脱敏掩码 / 徽标） */
+    --error-border: #e0a79f;    /* “下一个失败”按钮描边 */
+    --error-msg: #d33;          /* 错误消息文字 */
+    --warning: chocolate;       /* 警告 / 未完成（chocolate/橙） */
+    --success: #3aa757;         /* 成功图标 */
+    --success-2: #2e7d43;       /* 成功徽标文字 / 已复制 */
+
+    --stepid: #e3a664;          /* step-id 橙 */
+    --fail-mark: #e0533a;       /* 失败高亮（图标 / 左边条） */
+    --container-icon: #a08bc0;  /* 容器图标 */
+    --container-label: #8a6dbf; /* 容器标签文字 */
+    --origin: #a08;             /* 输入来源标注（品红） */
+    --stack-fg: #8a5a52;        /* 失败堆栈文字 */
+
+    --mark-bg: #ffe066;         /* 搜索命中高亮底 */
+    --mark-fg: #663c00;         /* 搜索命中高亮字 */
+    --search-row-bg: #fff8d8;   /* 左树含匹配的行 */
+    --search-current-bg: #ffe9a8; /* 当前匹配行/详情目标 */
+
+    --badge-success-bg: #e6f4ea; --badge-success-fg: #2e7d43;
+    --badge-failed-bg: #fdecea;  --badge-failed-fg: #c0392b;
+    --badge-skipped-bg: #eee;    --badge-skipped-fg: #888;
+    --badge-incomplete-bg: #fdf0e2; --badge-incomplete-fg: chocolate;
+
+    --failure-bg: #fdf3f1;      --failure-border: #f3c9c2;
+
+    --loopitem-border: #f0d9a8; /* 循环项值小节标题下划线 */
+    --loopitem-io-bg: #fffdf6;  /* 循环项值块底色 */
+
+    --copy-bg: rgba(255, 255, 255, 0.9);
+    --copy-fg: #777;
+    --copied-fg: #2e7d43;
+    --copied-border: #9ccfab;
+}
+
+/* ---- 暗色调色板 ---- */
+/* 跟随系统：仅当未手动指定 data-theme 时，随系统暗色生效。 */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+        color-scheme: dark;     /* 跟随系统暗色时，原生滚动条 / 控件也用暗色 */
+        --bg: #1e1e1e;
+        --panel-bg: #252526;
+        --input-bg: #2d2d30;
+        /* 工具栏按钮使用独立底色和轮廓，与输入框及工具栏背景区分。 */
+        --toolbar-button-bg: #34465e;
+        --toolbar-button-fg: #eff5ff;
+        --toolbar-button-border: #839bb9;
+        --toolbar-button-hover-bg: #435a79;
+        --toolbar-button-hover-border: #9bbfed;
+        --toolbar-button-active-bg: #263a55;
+        --toolbar-button-disabled-bg: #292d34;
+        --toolbar-button-disabled-fg: #737c89;
+        --toolbar-button-disabled-border: #404751;
+        --splitter-bg: #333333;
+        --hover-bg: #2a2d2e;
+        --select-bg: #3a331f;
+
+        --fg: #cccccc;
+        --fg-strong: #e6e6e6;
+        --fg-heading: #dcdcdc;
+        --muted: #9a9a9a;
+        --muted-2: #8a8a8a;
+        --dim: #7a7a7a;
+
+        --border: #3a3a3a;
+        --border-light: #333333;
+        --control-border: #4a4a4a;
+        --sep: #444444;
+        --seg-border: #4a4a4a;
+        --seg-divider: #3a3a3a;
+
+        --accent: #f0a500;
+        --accent-dark: #e0a44e;
+        --on-accent: #1e1e1e;
+        --link: #5aa2e0;
+
+        --error: #f28b82;
+        --error-border: #7a3b34;
+        --error-msg: #f28b82;
+        --warning: #e6a866;
+        --success: #6cc08a;
+        --success-2: #7bd39a;
+
+        --stepid: #e3a664;
+        --fail-mark: #f2795e;
+        --container-icon: #b39ddb;
+        --container-label: #b39ddb;
+        --origin: #d08bd0;
+        --stack-fg: #c99b90;
+
+        --mark-bg: #7a6414;
+        --mark-fg: #ffe9a8;
+        --search-row-bg: #3c361f;
+        --search-current-bg: #57491e;
+
+        --badge-success-bg: #1e3a28; --badge-success-fg: #7bd39a;
+        --badge-failed-bg: #3a1f1c;  --badge-failed-fg: #f28b82;
+        --badge-skipped-bg: #333333; --badge-skipped-fg: #aaaaaa;
+        --badge-incomplete-bg: #3a2e1c; --badge-incomplete-fg: #e6a866;
+
+        --failure-bg: #2c1f1d;      --failure-border: #5a352f;
+
+        --loopitem-border: #5a4a24;
+        --loopitem-io-bg: #2a2519;
+
+        --copy-bg: rgba(45, 45, 48, 0.9);
+        --copy-fg: #aaaaaa;
+        --copied-fg: #7bd39a;
+        --copied-border: #3f6b4a;
+    }
+}
+
+/* 手动“深色”：优先级高于 media（media 已被 :not([data-theme]) 限定）。 */
+:root[data-theme="dark"] {
+    color-scheme: dark;         /* 手动深色时，原生滚动条 / 控件也用暗色 */
+    --bg: #1e1e1e;
+    --panel-bg: #252526;
+    --input-bg: #2d2d30;
+    /* 工具栏按钮使用独立底色和轮廓，与输入框及工具栏背景区分。 */
+    --toolbar-button-bg: #34465e;
+    --toolbar-button-fg: #eff5ff;
+    --toolbar-button-border: #839bb9;
+    --toolbar-button-hover-bg: #435a79;
+    --toolbar-button-hover-border: #9bbfed;
+    --toolbar-button-active-bg: #263a55;
+    --toolbar-button-disabled-bg: #292d34;
+    --toolbar-button-disabled-fg: #737c89;
+    --toolbar-button-disabled-border: #404751;
+    --splitter-bg: #333333;
+    --hover-bg: #2a2d2e;
+    --select-bg: #3a331f;
+
+    --fg: #cccccc;
+    --fg-strong: #e6e6e6;
+    --fg-heading: #dcdcdc;
+    --muted: #9a9a9a;
+    --muted-2: #8a8a8a;
+    --dim: #7a7a7a;
+
+    --border: #3a3a3a;
+    --border-light: #333333;
+    --control-border: #4a4a4a;
+    --sep: #444444;
+    --seg-border: #4a4a4a;
+    --seg-divider: #3a3a3a;
+
+    --accent: #f0a500;
+    --accent-dark: #e0a44e;
+    --on-accent: #1e1e1e;
+    --link: #5aa2e0;
+
+    --error: #f28b82;
+    --error-border: #7a3b34;
+    --error-msg: #f28b82;
+    --warning: #e6a866;
+    --success: #6cc08a;
+    --success-2: #7bd39a;
+
+    --stepid: #e3a664;
+    --fail-mark: #f2795e;
+    --container-icon: #b39ddb;
+    --container-label: #b39ddb;
+    --origin: #d08bd0;
+    --stack-fg: #c99b90;
+
+    --mark-bg: #7a6414;
+    --mark-fg: #ffe9a8;
+    --search-row-bg: #3c361f;
+    --search-current-bg: #57491e;
+
+    --badge-success-bg: #1e3a28; --badge-success-fg: #7bd39a;
+    --badge-failed-bg: #3a1f1c;  --badge-failed-fg: #f28b82;
+    --badge-skipped-bg: #333333; --badge-skipped-fg: #aaaaaa;
+    --badge-incomplete-bg: #3a2e1c; --badge-incomplete-fg: #e6a866;
+
+    --failure-bg: #2c1f1d;      --failure-border: #5a352f;
+
+    --loopitem-border: #5a4a24;
+    --loopitem-io-bg: #2a2519;
+
+    --copy-bg: rgba(45, 45, 48, 0.9);
+    --copy-fg: #aaaaaa;
+    --copied-fg: #7bd39a;
+    --copied-border: #3f6b4a;
+}
+/* 手动“浅色”（data-theme="light"）无需单独声明：media 被 :not([data-theme]) 限定后自动失效，回落到 :root 亮色默认值。 */
+
+html, body { height: 100%; margin: 0; }
+body {
+    font-size: 14px;
+    color: var(--fg);
+    font-family: "Microsoft YaHei", "Segoe UI", Tahoma, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+}
+#qk-fallback { padding: 24px; color: var(--muted-2); }
+
+/* ---- 工具条 ---- */
+#qk-toolbar {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-bg);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    align-items: center;
+    font-size: 13px;
+}
+#qk-toolbar button {
+    box-sizing: border-box;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 18px;
+    min-height: 28px;
+    padding: 3px 10px;
+    cursor: pointer;
+    background: var(--toolbar-button-bg);
+    border: 1px solid var(--toolbar-button-border);
+    border-radius: 4px;
+    color: var(--toolbar-button-fg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .1);
+}
+#qk-toolbar button:not(:disabled):hover {
+    background: var(--toolbar-button-hover-bg);
+    border-color: var(--toolbar-button-hover-border);
+}
+#qk-toolbar button:not(:disabled):active,
+#qk-toolbar button[aria-expanded="true"] {
+    background: var(--toolbar-button-active-bg);
+    border-color: var(--toolbar-button-hover-border);
+    box-shadow: inset 0 0 0 1px var(--toolbar-button-hover-border);
+}
+#qk-toolbar button:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+}
+#qk-toolbar button:disabled {
+    opacity: 1;
+    cursor: default;
+    background: var(--toolbar-button-disabled-bg);
+    color: var(--toolbar-button-disabled-fg);
+    border-color: var(--toolbar-button-disabled-border);
+    box-shadow: none;
+}
+#qk-toolbar .qk-sep { width: 1px; height: 18px; background: var(--sep); }
+#qk-search {
+    font-size: 13px;
+    padding: 3px 6px;
+    min-width: 200px;
+    border: 1px solid var(--control-border);
+    border-radius: 3px;
+    background: var(--input-bg);
+    color: var(--fg);
+}
+#qk-status-filter, #qk-theme {
+    font-size: 13px;
+    padding: 3px 4px;
+    border: 1px solid var(--control-border);
+    border-radius: 3px;
+    background: var(--input-bg);
+    color: var(--fg);
+}
+#qk-search-nav { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+#qk-search-nav button { min-width: 28px; padding-left: 6px; padding-right: 6px; }
+#qk-search-pos { color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
+#qk-search-context {
+    color: var(--muted-2);
+    font-size: 12px;
+    max-width: 420px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#qk-count { color: var(--muted); font-size: 12px; margin-left: auto; }
+#qk-toolbar #qk-btn-nextissue:not(:disabled) { color: var(--error); border-color: var(--error-border); background: var(--failure-bg); }
+
+/* ---- 会话级运行环境与动作身份 ---- */
+#qk-report-info {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-bg);
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+    overflow-x: auto;
+}
+#qk-report-info .qk-report-info-sep { flex: 0 0 14px; }
+#qk-report-info .qk-mono { font-family: Consolas, "Courier New", monospace; }
+#qk-report-info .qk-source-revision { margin-left: 6px; font-size: inherit; }
+#qk-report-info a { color: var(--link); text-decoration: none; }
+#qk-report-info a:hover { text-decoration: underline; }
+
+/* ---- 首屏诊断摘要 / 最慢步骤 ---- */
+#qk-summary {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+}
+.qk-summary-main { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.qk-summary-title { color: var(--fg-heading); font-weight: bold; margin-right: 4px; }
+.qk-summary-chip {
+    border: 1px solid var(--control-border);
+    border-radius: 12px;
+    background: var(--input-bg);
+    color: var(--muted-2);
+    padding: 2px 9px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.qk-summary-chip:hover:not(:disabled) { border-color: var(--accent); color: var(--fg-strong); }
+.qk-summary-chip:disabled { opacity: 0.45; cursor: default; }
+.qk-summary-chip strong { color: var(--fg-heading); }
+.qk-summary-chip.qk-summary-attention,
+.qk-summary-chip.qk-summary-failed { border-color: var(--error-border); color: var(--error); }
+#qk-slowest-panel {
+    margin-top: 7px;
+    max-width: 720px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px;
+    background: var(--panel-bg);
+}
+.qk-slowest-title { color: var(--muted); font-size: 12px; margin: 0 4px 4px; }
+.qk-slowest-row {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: var(--fg);
+    padding: 4px 6px;
+    cursor: pointer;
+    text-align: left;
+}
+.qk-slowest-row:hover { background: var(--hover-bg); }
+.qk-slowest-row strong { color: var(--dim); font-size: 12px; }
+
+/* ---- 横幅（报告文件行 / 未完成中断） ---- */
+#qk-banners { flex: 0 0 auto; }
+#qk-banners .qk-banner { margin: 4px 10px; font-size: 0.9em; white-space: pre-wrap; }
+#qk-banners .qk-banner a { color: var(--link); text-decoration: none; }
+#qk-banners .qk-banner a:hover { text-decoration: underline; }
+.qk-banner-info { color: var(--muted-2); }
+.qk-banner-warning { color: var(--warning); font-weight: bold; }
+
+/* ---- 主体：左树 | 分隔条 | 右详情 ---- */
+#qk-main { flex: 1 1 auto; display: flex; min-height: 0; }
+#qk-tree-pane {
+    flex: 0 0 auto;
+    width: 38%;
+    min-width: 220px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    min-height: 0;
+}
+#qk-splitter {
+    flex: 0 0 auto;
+    width: 5px;
+    cursor: col-resize;
+    background: var(--splitter-bg);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+}
+#qk-splitter:hover, #qk-splitter.qk-dragging { background: var(--accent); }
+#qk-detail-pane {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: auto;
+    padding: 12px 16px;
+}
+
+/* ---- 左执行树（固定行高虚拟列表） ---- */
+#qk-tree-scroll { flex: 1 1 auto; overflow: auto; position: relative; outline: none; }
+#qk-tree-spacer { position: relative; width: 100%; }
+#qk-tree-rows { position: absolute; top: 0; left: 0; right: 0; will-change: transform; }
+#qk-tree-empty { padding: 18px 12px; color: var(--muted); }
+
+.qk-node {
+    height: 24px;
+    line-height: 24px;
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    cursor: pointer;
+    font-size: 13px;
+    box-sizing: border-box;
+    padding-right: 8px;
+    border-left: 3px solid transparent;
+}
+.qk-node:hover { background: var(--hover-bg); }
+.qk-node.qk-selected { background: var(--select-bg); border-left-color: var(--accent); }
+.qk-node.qk-status-failed { border-left-color: var(--fail-mark); }
+.qk-node.qk-status-incomplete { border-left-color: var(--warning); }
+.qk-node.qk-disabled { opacity: 0.5; }
+.qk-node.qk-search-hit { background: var(--search-row-bg); }
+.qk-node.qk-search-current-row { background: var(--search-current-bg); border-left-color: var(--accent); }
+.qk-node.qk-search-ancestor .qk-caret { color: var(--accent-dark); }
+
+.qk-caret {
+    flex: 0 0 auto;
+    width: 14px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 10px;
+    user-select: none;
+}
+.qk-caret.qk-caret-empty { visibility: hidden; }
+.qk-icon { flex: 0 0 auto; width: 16px; text-align: center; margin-right: 2px; }
+.qk-icon-success { color: var(--success); }
+.qk-icon-failed { color: var(--fail-mark); }
+.qk-icon-skipped { color: var(--dim); }
+.qk-icon-incomplete { color: var(--warning); }
+.qk-icon-canceled { color: var(--dim); }
+.qk-icon-container { color: var(--container-icon); }
+.qk-node-sid { flex: 0 0 auto; color: var(--stepid); margin-right: 6px; font-size: 0.85em; }
+.qk-node-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.qk-node-summary { color: var(--muted); margin-left: 7px; font-size: 0.92em; }
+.qk-node.qk-container .qk-node-label { color: var(--container-label); }
+.qk-node-start { flex: 0 0 auto; color: var(--muted); font-size: 0.8em; margin-left: 8px; }
+.qk-node-dur { flex: 0 0 auto; color: var(--dim); font-size: 0.8em; margin-left: 6px; }
+.qk-mark { background: var(--mark-bg); color: var(--mark-fg); border-radius: 2px; }
+.qk-match-count {
+    flex: 0 0 auto;
+    min-width: 16px;
+    height: 16px;
+    line-height: 16px;
+    padding: 0 4px;
+    margin-left: 5px;
+    border-radius: 8px;
+    box-sizing: border-box;
+    text-align: center;
+    font-size: 10px;
+    color: var(--mark-fg);
+    background: var(--mark-bg);
+}
+
+/* ---- 右详情面板 ---- */
+.qk-detail-empty { color: var(--muted); padding: 20px 4px; }
+.qk-dsummary { color: var(--muted); margin: -4px 0 10px; line-height: 1.5; white-space: pre-wrap; }
+.qk-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    min-width: 0;
+    overflow: hidden;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+.qk-breadcrumb button {
+    min-width: 0;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--link);
+    cursor: pointer;
+}
+.qk-breadcrumb button:disabled { color: var(--muted); cursor: default; }
+.qk-breadcrumb-sep { flex: 0 0 auto; color: var(--dim); }
+.qk-dtitle { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+.qk-dtitle .qk-dt-name { font-size: 1.15em; font-weight: bold; color: var(--fg-heading); }
+.qk-dtitle .qk-dt-sid { color: var(--stepid); font-size: 0.9em; }
+.qk-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 0.75em;
+    font-weight: bold;
+    vertical-align: middle;
+}
+.qk-badge-success { background: var(--badge-success-bg); color: var(--badge-success-fg); }
+.qk-badge-failed { background: var(--badge-failed-bg); color: var(--badge-failed-fg); }
+.qk-badge-skipped { background: var(--badge-skipped-bg); color: var(--badge-skipped-fg); }
+.qk-badge-incomplete { background: var(--badge-incomplete-bg); color: var(--badge-incomplete-fg); }
+.qk-badge-canceled { background: var(--badge-skipped-bg); color: var(--badge-skipped-fg); }
+.qk-dmeta { color: var(--muted); font-size: 0.82em; margin-bottom: 12px; }
+.qk-dmeta a { color: var(--link); text-decoration: none; margin-left: 8px; }
+.qk-dmeta a:hover { text-decoration: underline; }
+
+.qk-section { margin: 14px 0; }
+.qk-section > h3 {
+    font-size: 0.85em;
+    color: var(--muted);
+    font-weight: normal;
+    margin: 0 0 6px 0;
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--border-light);
+    letter-spacing: 0.05em;
+}
+
+.qk-io {
+    margin: 8px 0;
+    padding: 8px 10px;
+    background: var(--panel-bg);
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+}
+
+/* 输入/输出参数使用横向属性表：名称与值同行，保留值面板原有的全文、复制和脱敏能力。 */
+.qk-io-section > h3 { margin-bottom: 0; }
+.qk-io-section > .qk-io-compact {
+    display: grid;
+    grid-template-columns: minmax(160px, 24%) minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 3px;
+    align-items: start;
+    margin: 0;
+    padding: 6px 10px;
+    border-radius: 0;
+    border-bottom-width: 0;
+}
+.qk-io-section > .qk-io-compact:first-of-type {
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}
+.qk-io-section > .qk-io-compact:last-child {
+    border-bottom-width: 1px;
+    border-bottom-left-radius: 4px;
+    border-bottom-right-radius: 4px;
+}
+.qk-io-compact > .qk-io-head {
+    grid-column: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 5px 0;
+}
+.qk-io-compact > .qk-valwrap,
+.qk-io-compact > .qk-value,
+.qk-io-compact > .qk-pane,
+.qk-io-compact > .qk-io-value-cell,
+.qk-io-compact > .qk-vmeta,
+.qk-io-compact > .qk-attach,
+.qk-io-compact > .qk-search-target,
+.qk-io-compact > .qk-output-history {
+    grid-column: 2;
+    min-width: 0;
+}
+.qk-io-value-cell-switchable {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px;
+    align-items: start;
+}
+.qk-io-value-cell-switchable > .qk-seg {
+    margin-left: 0;
+    margin-top: 1px;
+}
+.qk-io-compact > .qk-value,
+.qk-io-compact > .qk-valwrap > .qk-value,
+.qk-io-compact > .qk-pane .qk-value,
+.qk-io-compact > .qk-io-value-cell .qk-value {
+    padding-top: 5px;
+    padding-bottom: 5px;
+}
+.qk-io-compact > .qk-output-history { margin-top: 5px; }
+
+/* F2：循环项值区块——迭代最前面，用左侧强调条一眼可辨"这次处理的项"。 */
+.qk-loopitem > h3 { color: var(--accent-dark); border-bottom-color: var(--loopitem-border); }
+.qk-loopitem .qk-io { border-left: 3px solid var(--accent); background: var(--loopitem-io-bg); }
+.qk-loop-exit { border-left: 3px solid var(--warning); padding-left: 10px; }
+.qk-loop-exit > h3 { color: var(--warning); }
+.qk-loop-exit-summary { color: var(--fg); line-height: 1.6; }
+.qk-loop-exit-summary strong { color: var(--fg-heading); }
+.qk-loop-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+    gap: 6px;
+}
+.qk-loop-stats > div {
+    display: flex;
+    flex-direction: column;
+    padding: 7px 9px;
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    background: var(--panel-bg);
+}
+.qk-loop-stats strong { color: var(--fg-heading); font-size: 1.05em; }
+.qk-loop-stats span { color: var(--muted); font-size: 0.78em; }
+.qk-loop-stats .qk-loop-problem strong { color: var(--error); }
+.qk-loop-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.qk-loop-links button,
+.qk-output-toggle {
+    border: 1px solid var(--control-border);
+    border-radius: 3px;
+    background: var(--input-bg);
+    color: var(--link);
+    padding: 2px 7px;
+    cursor: pointer;
+    font-size: 11px;
+}
+.qk-loop-links button:hover,
+.qk-output-toggle:hover { border-color: var(--accent); }
+.qk-io-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.qk-io-name { font-weight: bold; color: var(--fg); }
+.qk-io-origin { color: var(--origin); font-size: 0.8em; opacity: 0.8; }
+.qk-io-kind { color: var(--muted); font-size: 0.8em; }
+.qk-output-count { color: var(--muted); font-size: 0.8em; }
+.qk-output-toggle { margin-left: auto; }
+.qk-output-history {
+    margin-top: 8px;
+    padding-top: 4px;
+    border-top: 1px dashed var(--border);
+}
+.qk-output-history-row { margin: 8px 0; }
+.qk-output-history-row > span { display: block; color: var(--muted); font-size: 0.78em; margin-bottom: 2px; }
+
+/* 表达式↔值 分段切换控件 */
+.qk-seg { display: inline-flex; border: 1px solid var(--seg-border); border-radius: 4px; overflow: hidden; margin-left: auto; }
+.qk-seg button {
+    border: none;
+    background: var(--input-bg);
+    color: var(--muted-2);
+    font-size: 12px;
+    padding: 2px 10px;
+    cursor: pointer;
+}
+.qk-seg button + button { border-left: 1px solid var(--seg-divider); }
+.qk-seg button.qk-seg-active { background: var(--accent); color: var(--on-accent); }
+
+.qk-pane { display: none; }
+.qk-pane.qk-pane-active { display: block; }
+
+.qk-search-target { min-width: 0; }
+.qk-search-current {
+    border-radius: 4px;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    background: var(--search-current-bg);
+}
+.qk-search-mark {
+    background: var(--mark-bg);
+    color: var(--mark-fg);
+    border-radius: 2px;
+    padding: 0;
+}
+
+/* 完整值：等宽、可滚动、可复制 */
+.qk-valwrap { position: relative; }
+.qk-value {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 8px;
+    max-height: 360px;
+    overflow: auto;
+    color: var(--fg-heading);
+    margin: 0;
+}
+.qk-value.qk-value-masked { color: var(--error); font-family: inherit; }
+.qk-value.qk-value-null { color: var(--dim); font-style: italic; }
+.qk-option-value {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-family: inherit;
+}
+.qk-option-title { color: var(--fg-heading); }
+.qk-option-raw {
+    color: var(--muted);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 0.9em;
+}
+.qk-vmeta { color: var(--muted); font-size: 0.78em; margin: 0 0 2px; padding-right: 52px; }
+.qk-vmeta .qk-vtrunc { color: var(--warning); }
+.qk-valwrap { position: relative; }
+.qk-copy {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    z-index: 2;
+    font-size: 11px;
+    padding: 1px 8px;
+    border: 1px solid var(--control-border);
+    border-radius: 3px;
+    background: var(--copy-bg);
+    color: var(--copy-fg);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s;
+}
+.qk-valwrap:hover .qk-copy, .qk-copy:focus { opacity: 1; }
+.qk-copy:hover { border-color: var(--accent); color: var(--fg-strong); }
+.qk-copy.qk-copied { color: var(--copied-fg); border-color: var(--copied-border); opacity: 1; }
+.qk-attach a { color: var(--link); }
+
+/* 消息 */
+.qk-msg { margin: 4px 0; font-size: 0.88em; white-space: pre-wrap; word-break: break-word; }
+.qk-msg-info { color: var(--muted); }
+.qk-msg-warning { color: var(--warning); }
+.qk-msg-error { color: var(--error-msg); }
+
+/* 失败区 */
+.qk-failure { border: 1px solid var(--failure-border); background: var(--failure-bg); border-radius: 4px; padding: 8px 10px; }
+.qk-failure .qk-fail-msg { color: var(--error); font-weight: bold; margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+.qk-expression-diagnostic { margin: 8px 0 10px; }
+.qk-expression-diagnostic .qk-vmeta { margin-bottom: 4px; }
+.qk-code-frame {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--input-bg);
+    color: var(--fg);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    tab-size: 4;
+    overflow: auto;
+}
+.qk-stack {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--stack-fg);
+    max-height: 300px;
+    overflow: auto;
+    margin: 0;
+}
+
+/* 容器节点说明 */
+.qk-container-note { color: var(--container-label); font-size: 0.9em; line-height: 1.7; }
+.qk-container-note .qk-cn-k { color: var(--muted); margin-right: 4px; }
+
+/* 变量记录分页展示，保留执行树及详情的可用空间。 */
+#qk-variables[hidden] { display: none; }
+#qk-variables { flex: 0 0 auto; height: 280px; min-height: 0; box-sizing: border-box; overflow: auto; border-bottom: 1px solid var(--border); background: var(--panel-bg); }
+.qk-variable-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; position: sticky; top: 0; z-index: 1; background: var(--panel-bg); }
+.qk-variable-controls label { display: inline-flex; align-items: center; gap: 4px; }
+.qk-variable-controls input { width: 200px; max-width: 45vw; }
+#qk-variables button, #qk-variables input, #qk-variables select, .qk-variable-links button { font: inherit; color: var(--fg); background: var(--input-bg); border: 1px solid var(--control-border); border-radius: 3px; padding: 3px 6px; }
+#qk-variables button, .qk-variable-links button { cursor: pointer; }
+#qk-variables button:disabled { opacity: .45; cursor: default; }
+.qk-variable-note, .qk-variable-empty { padding: 4px 10px; color: var(--muted-2); font-size: 12px; }
+#qk-variables .qk-variable-row { display: grid; grid-template-columns: 86px minmax(80px, 1fr) minmax(160px, 3fr) minmax(70px, 1fr) minmax(100px, 2fr); gap: 10px; width: 100%; border: 0; border-bottom: 1px solid var(--border-light); border-radius: 0; text-align: left; padding: 6px 10px; }
+.qk-variable-row > * { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#qk-variables .qk-variable-row:hover { background: var(--hover-bg); }
+.qk-variable-links { margin: 8px 0; }
+.qk-variable-links button { color: var(--link); margin: 2px; }
+#qk-variable-selected { padding: 8px; }
+#qk-main { flex: 1 1 0px; min-height: 0; }
+@media (max-width: 650px) {
+    #qk-variables .qk-variable-row { grid-template-columns: 80px minmax(80px, 1fr) minmax(100px, 2fr); }
+    .qk-variable-row > :nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
+    .qk-variable-row > :nth-child(4) { display: none; }
+}
+
+.qk-variable-link { font: inherit; color: var(--link); border: 0; background: transparent; padding: 0; cursor: pointer; text-align: left; }
+.qk-variable-link:disabled { color: inherit; cursor: default; }
+
+/* 紧凑候选列表不使用浏览器原生 datalist；浮层不参与上下区域的高度计算。 */
+.qk-variable-picker { display: inline-flex; align-items: stretch; min-width: 0; }
+#qk-variables .qk-variable-picker input { border-radius: 3px 0 0 3px; }
+#qk-variables .qk-variable-picker button { border-left: 0; border-radius: 0 3px 3px 0; padding: 2px 5px; }
+#qk-variable-candidates[hidden], #qk-variable-splitter[hidden] { display: none; }
+#qk-variable-candidates { position: fixed; z-index: 30; overflow-y: auto; box-sizing: border-box; padding: 3px; border: 1px solid var(--control-border); border-radius: 3px; background: var(--input-bg); color: var(--fg); box-shadow: 0 3px 10px rgba(0,0,0,.16); }
+#qk-variable-candidates [role="option"] { padding: 2px 6px; line-height: 20px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; border-radius: 2px; }
+#qk-variable-candidates [role="option"]:hover, #qk-variable-candidates [aria-selected="true"] { background: var(--select-bg); }
+#qk-variable-splitter { flex: 0 0 6px; height: 6px; cursor: row-resize; background: var(--splitter-bg); touch-action: none; }
+#qk-variable-splitter:hover, #qk-variable-splitter:focus-visible, #qk-variable-splitter.qk-dragging { background: var(--accent); outline: none; }
+
+/* 当前执行的额外赋值：窄详情列换行，预览保持有界，完整内容按需查看。 */
+.qk-write-group { border-bottom: 1px solid var(--border-light); padding: 6px 0; }
+.qk-write-preview { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(100px, 2fr); gap: 10px; width: 100%; text-align: left; padding: 6px 8px; background: var(--panel-bg); color: var(--fg); border: 1px solid var(--border-light); border-radius: 4px; cursor: pointer; font: inherit; }
+.qk-write-preview > * { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qk-write-preview > span { font-weight: 600; }
+.qk-write-preview > code { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.qk-write-preview:hover { background: var(--hover-bg); }
+.qk-write-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.qk-write-history { margin: 6px 0 0 12px; max-height: 280px; overflow: auto; }
+@media (max-width: 700px) {
+    .qk-write-preview { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+</head><body>
+<!-- Quicker 结构化调试报告（修订 R：主从式诊断界面 + 全值采集）。数据见下方 script#quicker-debug-data（节点树 tree + 值映射 values）。SnapshotHash=f7d66ef4982aec6529196e10345648ffc2fa0c20cab287e03eff49d4f4add048 -->
+<script type="application/json" id="quicker-debug-data">{"variableScopes":[{"id":1}],"meta":{"snapshotHash":"f7d66ef4982aec6529196e10345648ffc2fa0c20cab287e03eff49d4f4add048","actionId":"1ea81009-7beb-4818-afd6-39dbb7b01213","actionName":"规则重命名和归类","quickerVersion":"2.3.37.0","operatingSystem":"10.0.26300.0","startedUtc":"2026-11-14T08:23:04.8177606+00:00","status":"Succeeded","manifestTerminal":true,"sessionComplete":true,"incompleteCount":0,"reportPath":"C:\\Users\\tyski\\AppData\\Local\\Quicker\\XActionDebug\\session-f135a4d5-de38-403f-a2e5-b6192265f740\\report.html","relatedInvocationsUrl":"invocations/index.html","budget":{"eventCountLimit":100000,"eventByteLimit":33554432,"eventCount":43,"eventBytes":12929,"eventsTruncated":false,"sessionRetentionLimit":30,"attachmentCount":2,"attachmentBytes":231607,"valueCountLimit":20000,"valueByteLimit":16777216,"valueCount":7,"valueBytes":3056,"valuesTruncated":false,"observationDegraded":false}},"tree":[{"variableOutputs":[{"variableScopeId":1,"sequence":3,"paramName":"变量赋值","targetName":"quicker_in_param","targetKind":"Variable","value":{"preview":""}},{"variableScopeId":1,"sequence":4,"paramName":"变量赋值","targetName":"输入文件路径","targetKind":"Variable","value":{"preview":"[]"}},{"variableScopeId":1,"sequence":5,"paramName":"变量赋值","targetName":"最早起始年份","targetKind":"Variable","value":{"preview":"2000"}},{"variableScopeId":1,"sequence":7,"paramName":"变量赋值","targetName":"批量重命名器预设","targetKind":"Variable","value":{"preview":"{presetVersion: 0.05, presets: {…}}","ref":"d5fac4c5e6db2a951284345c1cd2b448"}},{"variableScopeId":1,"sequence":8,"paramName":"变量赋值","targetName":"原路径和文件名","targetKind":"Variable","value":{"preview":"[]"}},{"variableScopeId":1,"sequence":9,"paramName":"变量赋值","targetName":"目标路径和文件名","targetKind":"Variable","value":{"preview":"[]"}},{"variableScopeId":1,"sequence":11,"paramName":"变量赋值","targetName":"扩展名预设","targetKind":"Variable","value":{"preview":"{presetVersion: 0.04, presets: {…}}","ref":"5c8dca70a01aee5e67ad374f2a41c830"}},{"variableScopeId":1,"sequence":12,"paramName":"变量赋值","targetName":"quicker_in_param","targetKind":"Variable","value":{"preview":""}}],"id":"n1","kind":"actionRoot","status":"success","title":"规则重命名和归类","durationMs":28110.9368,"detail":{"inputs":[{"variableScopeId":1,"sequence":6,"paramName":"批量重命名器预设","origin":"state","varName":"批量重命名器预设","value":{"preview":"{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022presets\u0022:{\u0022默认\u0022:{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022rootMode\u0022:\u0022current\u0022,\u0022rootPath\u0022:\u0022\u0022,\u0022startYear\u0022:\u00222000\u0022,\u0022filterExtensions\u0022:\u0022\u0022,\u0022filterMode\u0022:\u0022skip\u0022,\u0022dateSource\u0022:\u0022filename\u0022,\u0022dateFallbackOrder\u0022:\u0022filename,exif,modified,created,empty\u0022,\u0022dateFallback…","ref":"d5fac4c5e6db2a951284345c1cd2b448"}},{"variableScopeId":1,"sequence":10,"paramName":"扩展名预设","origin":"state","varName":"扩展名预设","value":{"preview":"{\u0022presetVersion\u0022:\u00220.04\u0022,\u0022presets\u0022:{\u0022视频\u0022:\u0022mp4\u0022}}"}}]},"children":[{"id":"n2","kind":"step","status":"success","title":"注释","summary":"获取文件日期  目的文件夹路径： \t选择根文件夹或当前文件夹/yyyy.dd/用户选择/","stepId":"0","runnerKey":"sys:comment","elapsedMs":38.9731,"durationMs":1.7804,"leaf":true,"sourceNodeId":"n_92049fc45b27d77fa1ebde6d96ea22dc","sourcePath":"/steps/0"},{"id":"n3","kind":"step","status":"success","title":"获取选择的文件(夹)/选择特定文件","summary":"获取选择的文件 {输入文件路径}","stepId":"1","runnerKey":"sys:getSelectedFiles","elapsedMs":41.5638,"durationMs":31.3973,"leaf":true,"sourceNodeId":"n_59008dffeb01902991d7fe996cc9de1d","sourcePath":"/steps/1","detail":{"inputs":[{"paramName":"操作类型","optionName":"获取选择的文件","origin":"value","value":{"preview":"GetSelection"}},{"paramName":"等待剪贴板时间","origin":"value","value":{"preview":"200"}},{"paramName":"排序文件列表","optionName":"默认（文件名自然排序）","origin":"value","value":{"preview":"Default"}}],"outputs":[{"variableScopeId":1,"sequence":21,"paramKey":"files","paramName":"路径列表","targetName":"输入文件路径","targetKind":"Variable","value":{"preview":"[E:\\ONEDRIVE\\Picture\\Screenshots\\…]","ref":"95dac8419e217213eeda5afe5aa0cfa9"}}],"messages":[{"level":"info","text":"通过Win32接口获得了1个文件"}]}},{"id":"n4","kind":"step","status":"success","title":"注释","summary":"基于quicker的【自定义窗口】动作，https://getquicker.net/KC/Help/Doc/customwindow。 批量重命名器，可以获取文件属性并制定规则，组合成新的路径和文件名   输入路径： 列表【输入文件路径】 输入配置参数：【最早起始年份】默认2000年 输入预设：词典【批量重命名器预设】  一、获取文件属性信息 先判断是不是文件，跳过文件夹  获取文件的各种日期： 1. 【文件名中的日期】：按顺序获取任意一个即停止。 \t匹配格式1：（先验）yyyy-mm-dd，如2020-02-02 \t匹配格式2：（先验）yyyymmdd，如20200202 \t先验：非数字或字符串起始，保障不会匹配到后面的数字。不需要匹配后边界，因为后面不一定是时间还是文件名还是连接符。 \tyyyy范围：【最早起始年份】~当前年 2. 【exif拍摄日期】 3. 【修改日期】 4. 【创建日期】   二、配置和展示，显示一个界面，包括两个部分：一个配置框、一个表格  其中配置框用于配置：目标路径名和文件名 表格分两列展示：源路径名、目标路径名/文件名，鼠标悬浮在行上的时候可以显示该文件的各种属性信息。  实时刷新开关：开启时候，配置变更时候，目标路径名/文件名实时刷新。否则用户点击预览按钮手动刷新。   配置框包含以下配置选项 过滤器卡片：过滤器卡片，过滤器的功能与【 https://github.com/lj-k/APP_FileSettle 】保持同步，决策模式支持跳过、复制、移动、重命名，增加一个词典变量【扩展名预设】用于保存和载入扩展名列表。载入时候可选覆盖现有和append现有。  配置1：【根路径】：默认当前文件夹，可选择其他文件夹，当用户点击其他文件夹时候，跳出文件夹选择器。\u0022当前文件夹\u0022是指每个源文件所在目录。 配置2：【最早起始年份】，默认2000，当该配置变更时候，重新获取【文件名中的日期】 配置3：【日期】， \t配置3.1：下拉菜单，从【文件名中的日期】、【exif拍摄日期】、【修改日期】、【创建日期】中四选一。默认【文件名中的日期】 \t配置3.2：缺失递补顺序：【是否开启缺失递补】 \t\t默认开启：用户可配置缺失递补顺序，默认按【文件名中的日期】、【exif拍摄日期】、【修改日期】、【创建日期】。 \t\t如果不开启：用户可选择缺失后的字符串为空或者自定义字符串。 配置4：【校验码】：包含【校验算法】（CRC32、BLAKE3、MD5、SHA-256）,【校验位数】（1~算法最高值），【校验码前缀】、【校验码后缀】。默认校验码格式, 校验码位数==默认值时候可以不显示：[CRC32-7f7f7f7f],否则[CRC32_4-7f7f],位数为16进制位数。  \t校验码例1：【校验算法】CRC32,【校验位数】8，【校验码前缀】[、【校验码后缀】], 输出[CRC32-7f7f7f7f]。 \t校验码截取：取高位。默认完整长度。 \t 配置：目标路径和文件名编辑器：点击胶囊，可以在目标路径编辑框的光标位置插入胶囊，支持胶囊如下： 【日期yyyy】 【日期mm】 【日期dd】 【根路径】 【源文件名】：不带扩展名 【扩展名】 【校验码】 例1： \t输入路径为：C://A/B/C/D.TXT \t目标路径和文件名编辑器内容为：默认：【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】 \t当选择重命名时候，默认内容为：【根路径】/【源文件名】-【校验码】.【扩展名】 \t配置1【根路径】=当前文件夹，【校验码】=（[CRC32_4-7f7f]） \t重命名后的内容为：C://A/B/C/2020.06/aaa/bbb/D-[CRC32_4-7f7f].TXT \t路径分隔符是否统一为 Windows 反斜杠。 配置框中有载入和保存两个按钮，可以载入和保存预设。预设输出为quicker的词典格式。保存所有配置参数，词典格式随可配置项目更新。 目标路径和文件名编辑器输入框要加强校验，避免并提示所有不符合linux、windows、macos、android的非法字符，避免并提示其他非法路径问题。 发现非法路径的时候，在窗口上方红字提示，并使用红底高亮表格中的异常行。  展示界面仅供预览，不做最终处理。展示界面最终输出两个列表、一个动作 列表【原路径和文件名】，只输出非跳过的列表 列表【目标路径和文件名】，只输出非跳过的列表 动作：跳过、移动、复制、重命名 要保证两个列表序号一致。即列表长度一致，列表的n序号的对应的原、目标路径是同一个文件的。   再输出一个预设：词典【批量重命名器预设】  三、执行配置框，一个执行按钮。 执行配置框，可配置： \t并行数量下拉框，运行1~8线程并行执行。 \t执行后校验开关：当复制和移动时候，对于目标路径的文件重新计算校验码，并对比文件名中的校验码是否一致。校验算法与选择的【校验码】的【校验算法】一致。 \t显示执行状态：显示执行总数和已完成数量、错误数量、传输速度、执行速度等信息。已完成的项目，在展示界面列表项目底色标绿，如果项目出错，底色标红。悬浮显示错误原因。 \t执行按钮：点击按照展示界面列表的决策、原路径、目标路径执行。检查路径是否存在，不存在自动新建文件夹。","stepId":"2","runnerKey":"sys:comment","elapsedMs":72.9954,"durationMs":0.0095,"leaf":true,"sourceNodeId":"n_8b71f07a52af7daf9fe5555619077589","sourcePath":"/steps/2"},{"id":"n5","kind":"step","status":"success","title":"自定义窗口","summary":"显示窗口并等待关闭","stepId":"3","runnerKey":"sys:customwindow","elapsedMs":73.0059,"durationMs":28039.8767,"leaf":true,"sourceNodeId":"n_4a462fce220e2a13dd00db6445eab1ef","sourcePath":"/steps/3","detail":{"inputs":[{"paramName":"操作类型","optionName":"显示窗口并等待关闭","origin":"value","value":{"preview":"ShowAndWaitClose"}},{"paramName":"窗口XAML代码","origin":"value","value":{"preview":"\u003c大文本已存附件，长度 35855\u003e","ref":"de3501318241cbee3c8c8ee7c208f973"}},{"paramName":"数据映射","origin":"value","value":{"preview":"files:{输入文件路径}\r\nstartYear:{最早起始年份}\r\npreset:{批量重命名器预设}\r\nextensionPresets:{扩展名预设}","ref":"58489e0660af3a901512007046aaf159"}},{"paramName":"事件","origin":"value","value":{"preview":""}},{"paramName":"辅助C#代码","origin":"value","value":{"preview":"\u003c大文本已存附件，长度 183140\u003e","ref":"6f887048f043d6b2a852a2a360cc27ee"}},{"paramName":"辅助C#引用DLL库","origin":"value","value":{"preview":""}},{"paramName":"自动关闭时间(S)","origin":"value","value":{"preview":"0"}},{"paramName":"窗口位置","optionName":"屏幕中间","origin":"value","value":{"preview":"CenterScreen"}},{"paramName":"最大尺寸/位置坐标","origin":"value","value":{"preview":""}},{"paramName":"激活模式","optionName":"支持激活，打开时抢占焦点","origin":"value","value":{"preview":"AutoActivate"}},{"paramName":"失去焦点后关闭窗口","optionName":"否","origin":"value","value":{"preview":"false"}},{"paramName":"窗口标识","origin":"value","value":{"preview":"BatchRenamerWindow"}},{"paramName":"鼠标定位偏移","origin":"value","value":{"preview":""}}],"outputs":[{"variableScopeId":1,"sequence":39,"targetName":"批量重命名器预设","targetKind":"Variable","value":{"preview":"{presetVersion: 0.05, presets: System.Collections.Generic.Dicti…}","ref":"f3e2a3d41aadfd9f6e00e6c3dfde4414"}}]}}]}],"values":{"d5fac4c5e6db2a951284345c1cd2b448":{"typeName":"string(len=490)","preview":"{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022presets\u0022:{\u0022默认\u0022:{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022rootMode\u0022:\u0022current\u0022,\u0022rootPath\u0022:\u0022\u0022,\u0022startYear\u0022:\u00222000\u0022,\u0022filterExtensions\u0022:\u0022\u0022,\u0022filterMode\u0022:\u0022skip\u0022,\u0022dateSource\u0022:\u0022filename\u0022,\u0022dateFallbackOrder\u0022:\u0022filename,exif,modified,created,empty\u0022,\u0022dateFallback…","hash":"d5fac4c5e6db2a951284345c1cd2b448","truncated":true,"sensitive":false,"content":"{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022presets\u0022:{\u0022默认\u0022:{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022rootMode\u0022:\u0022current\u0022,\u0022rootPath\u0022:\u0022\u0022,\u0022startYear\u0022:\u00222000\u0022,\u0022filterExtensions\u0022:\u0022\u0022,\u0022filterMode\u0022:\u0022skip\u0022,\u0022dateSource\u0022:\u0022filename\u0022,\u0022dateFallbackOrder\u0022:\u0022filename,exif,modified,created,empty\u0022,\u0022dateFallbackCustomText\u0022:\u0022\u0022,\u0022realTimePreview\u0022:\u0022true\u0022,\u0022execParallel\u0022:\u00222\u0022,\u0022execVerify\u0022:\u0022true\u0022,\u0022checksumAlgorithm\u0022:\u0022CRC32\u0022,\u0022checksumDigits\u0022:\u00228\u0022,\u0022checksumPrefix\u0022:\u0022[\u0022,\u0022checksumSuffix\u0022:\u0022]\u0022,\u0022template\u0022:\u0022【根路径】/【日期yyyy】.【日期mm】/aaa/bbb/【源文件名】-【校验码】.【扩展名】\u0022}}}"},"5c8dca70a01aee5e67ad374f2a41c830":{"typeName":"Dictionary(count=2)","preview":"{presetVersion: 0.04, presets: {…}}","hash":"5c8dca70a01aee5e67ad374f2a41c830","truncated":true,"sensitive":false,"content":"{\u0022presetVersion\u0022:\u00220.04\u0022,\u0022presets\u0022:{\u0022视频\u0022:\u0022mp4\u0022}}"},"95dac8419e217213eeda5afe5aa0cfa9":{"typeName":"List(count=1)","preview":"[E:\\ONEDRIVE\\Picture\\Screenshots\\…]","hash":"95dac8419e217213eeda5afe5aa0cfa9","truncated":false,"sensitive":false,"content":"[\u0022E:\\\\ONEDRIVE\\\\Picture\\\\Screenshots\\\\Screenrecorder-2024-11-16-10-44-36-714.mp4\u0022]"},"de3501318241cbee3c8c8ee7c208f973":{"typeName":"string(len=35855)","preview":"\u003c大文本已存附件，长度 35855\u003e","hash":"de3501318241cbee3c8c8ee7c208f973","truncated":true,"sensitive":false,"attachmentRef":"att-0000.txt"},"58489e0660af3a901512007046aaf159":{"typeName":"string(len=79)","preview":"files:{输入文件路径}\r\nstartYear:{最早起始年份}\r\npreset:{批量重命名器预设}\r\nextensionPresets:{扩展名预设}","hash":"58489e0660af3a901512007046aaf159","truncated":false,"sensitive":false},"6f887048f043d6b2a852a2a360cc27ee":{"typeName":"string(len=183140)","preview":"\u003c大文本已存附件，长度 183140\u003e","hash":"6f887048f043d6b2a852a2a360cc27ee","truncated":true,"sensitive":false,"attachmentRef":"att-0001.txt"},"f3e2a3d41aadfd9f6e00e6c3dfde4414":{"typeName":"Dictionary(count=2)","preview":"{presetVersion: 0.05, presets: System.Collections.Generic.Dicti…}","hash":"f3e2a3d41aadfd9f6e00e6c3dfde4414","truncated":true,"sensitive":false,"content":"{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022presets\u0022:{\u0022图片-截屏\u0022:{\u0022presetVersion\u0022:\u00220.05\u0022,\u0022rootMode\u0022:\u0022current\u0022,\u0022rootPath\u0022:\u0022\u0022,\u0022startYear\u0022:\u00222000\u0022,\u0022filterExtensions\u0022:\u0022\u0022,\u0022filterMode\u0022:\u0022skip\u0022,\u0022dateSource\u0022:\u0022filename\u0022,\u0022dateFallbackOrder\u0022:\u0022filename,exif,modified,created,empty\u0022,\u0022dateFallbackCustomText\u0022:\u0022\u0022,\u0022realTimePreview\u0022:\u0022true\u0022,\u0022execParallel\u0022:\u00222\u0022,\u0022execVerify\u0022:\u0022true\u0022,\u0022checksumAlgorithm\u0022:\u0022CRC32\u0022,\u0022checksumDigits\u0022:\u00228\u0022,\u0022checksumPrefix\u0022:\u0022[\u0022,\u0022checksumSuffix\u0022:\u0022]\u0022,\u0022template\u0022:\u0022【根路径】/【日期yyyy】.【日期mm】/图片/截屏/【源文件名】-【校验码】.【扩展名】\u0022}}}"}}}</script>
+<div id="qk-fallback">正在加载诊断查看器…（若长时间无内容，请用支持 JavaScript 的现代浏览器打开）</div>
+<script>/*
+ * Quicker 结构化调试查看器（修订 R：主从式诊断界面）—— 手写单文件 vanilla JS（无构建工具链/框架，离线自包含）。
+ *
+ * 数据契约（{meta, tree[], values{}}，见 DebugRowModel.cs）：C# 已产出【已解释、保留本地原文、已解引用】的执行节点树 + 值映射。
+ * 本前端【不重新解释事件】，只做：解析内嵌 JSON → 左执行树导航（虚拟滚动 + 折叠）→ 右步骤详情检视
+ * （输入表达式↔值切换、完整值 + 复制、输出、消息、失败）→ 搜索/过滤/下一个失败 → sourcePath/step-id 发 quicker:findstep。
+ *
+ * 诊断导向（相对方案 A 的三点纠偏）：
+ *  1. 看得全值——详情面板按 value.ref 从 values 取【完整全文 content】，等宽可滚动 + 复制，不再截断、不再 tooltip 展开。
+ *  2. 可切换视角——表达式/变量输入的【原始源码】与【求值结果】以分段控件切换（两份数据都完整）。
+ *  3. 高信息密度——主从式：左树定位一步，右面板汇总该步完整上下文（输入/输出/消息/失败）。
+ *
+ * 虚拟滚动（左树）：可见节点是【折叠/状态过滤后派生的节点下标序列】；搜索只标注并导航，不改变可见性。左树行为单行固定行高（ROW_H），故用
+ * “start = floor(scrollTop/ROW_H)、窗口内建 DOM、translateY 定位”的定高窗口化——10 万节点只建可视窗口的几十个 DOM，
+ * 比方案 A 的“测量 + 前缀和 + 二分”更简单稳健（左导航天然单行，无需不定行高测量；详情才有长内容且不虚拟化）。
+ *
+ * 安全/保真：全文本 esc 转义（除 message.level=raw 用 innerHTML 复现 AddRawContent）；新报告保留本地原文，旧报告的 sensitive 标志仍按 ****** 兼容显示；无外部请求。
+ */
+(function (global) {
+    'use strict';
+
+    // ==================== 纯逻辑（可在 Node 下单测，无 DOM 依赖） ====================
+
+    var HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    function esc(s) {
+        if (s === null || s === undefined) return '';
+        return String(s).replace(/[&<>"']/g, function (c) { return HTML_ESCAPES[c]; });
+    }
+
+    /** 容器（非叶步骤）类节点集合：导航层级用，无 detail 或仅时序。 */
+    var CONTAINER_KINDS = { loop: 1, loopIteration: 1, scope: 1, parallelScope: 1, parallelBranch: 1, actionRoot: 1 };
+    function isContainerKind(kind) { return CONTAINER_KINDS[kind] === 1; }
+
+    /**
+     * 先序展开节点树为扁平数组（虚拟滚动 / 折叠 / 过滤的统一底座）。
+     * 每项：{ node, depth, parent(扁平下标，-1=根), collapsible(有子节点) }。
+     */
+    function flattenTree(tree) {
+        var flat = [];
+        function rec(arr, depth, parentIdx) {
+            for (var i = 0; i < arr.length; i++) {
+                var node = arr[i];
+                var idx = flat.length;
+                var kids = node.children;
+                flat.push({ node: node, depth: depth, parent: parentIdx, collapsible: !!(kids && kids.length) });
+                if (kids && kids.length) rec(kids, depth + 1, idx);
+            }
+        }
+        rec(tree || [], 0, -1);
+        return flat;
+    }
+
+    /**
+     * 默认折叠所有有子节点的非根节点。
+     * 动作根保持展开，首屏可直接看到顶层步骤；失败节点仍由启动逻辑展开其祖先链。
+     */
+    function createDefaultCollapsed(flat) {
+        var result = new Set();
+        for (var i = 0; i < flat.length; i++) {
+            if (flat[i].collapsible && flat[i].node.kind !== 'actionRoot') result.add(flat[i].node.id);
+        }
+        return result;
+    }
+
+    /** 状态过滤：mode='all' 全通过；否则要求 node.status 恰为该状态（failed/incomplete/skipped）。 */
+    function nodeStatusMatches(node, mode) {
+        if (!mode || mode === 'all') return true;
+        if (mode === 'attention') return isAttentionNode(node);
+        if (mode === 'message') return hasAttentionMessage(node);
+        return node.status === mode;
+    }
+
+    /** 节点可搜索文本（兼容旧纯逻辑调用；查看器运行时使用字段级 collectSearchMatches）。 */
+    function nodeSearchText(node) {
+        var parts = [];
+        function push(v) { if (v !== null && v !== undefined && v !== '') parts.push(v); }
+        push(node.title); push(node.summary); push(node.stepId); push(node.runnerKey);
+        if (node.kind === 'loopIteration') {
+            push('第' + node.iterationNumber + '次循环');
+            if (node.itemValue && !node.itemSensitive) push(node.itemValue.preview); // F2：项值预览可被搜索命中。
+        }
+        if (node.kind === 'loopExit') {
+            push('提前结束循环'); push('中止条件'); push(node.loopExitReason);
+        }
+        if (node.kind === 'parallelScope') push(node.waitMode);
+        if (node.kind === 'parallelBranch') push('lane' + node.laneId);
+        var d = node.detail;
+        if (d) {
+            var i;
+            if (d.inputs) for (i = 0; i < d.inputs.length; i++) {
+                var inp = d.inputs[i];
+                push(inp.paramName); push(inp.optionName); push(inp.varName); push(inp.expression);
+                if (inp.value) push(inp.value.preview);
+            }
+            if (d.outputs) for (i = 0; i < d.outputs.length; i++) {
+                var o = d.outputs[i];
+                push(outputLabel(o)); push(o.targetKind);
+                if (o.value) push(o.value.preview);
+            }
+            if (d.messages) for (i = 0; i < d.messages.length; i++) push(d.messages[i].text);
+            if (d.failure) { push(d.failure.message); }
+        }
+        return parts.join('').toLowerCase();
+    }
+
+    function nodeMatchesSearch(node, qLower) {
+        if (!qLower) return true;
+        return nodeSearchText(node).indexOf(qLower) >= 0;
+    }
+
+    function searchableValueText(cell, values, sensitive, cache) {
+        if (!cell || sensitive) return '';
+        var cacheKey = cell.ref ? 'ref:' + cell.ref : null;
+        if (cacheKey && cache && cache[cacheKey] !== undefined) return cache[cacheKey];
+        var resolved = resolveValue(cell, values);
+        var text = '';
+        if (resolved.kind === 'full') text = resolved.content || '';
+        else if (resolved.kind === 'inline') text = resolved.text || '';
+        else if (resolved.kind === 'attachment') text = cell.preview || resolved.attachmentRef || '';
+        if (cacheKey && cache) cache[cacheKey] = text;
+        return text;
+    }
+
+    function addSearchMatch(matches, qLower, flatIdx, key, category, label, text, extra) {
+        if (text === null || text === undefined || text === '') return;
+        var value = String(text);
+        if (value.toLowerCase().indexOf(qLower) < 0) return;
+        var match = {
+            flatIdx: flatIdx,
+            key: key,
+            category: category,
+            label: label,
+            text: value
+        };
+        if (extra) {
+            for (var name in extra) if (Object.prototype.hasOwnProperty.call(extra, name)) match[name] = extra[name];
+        }
+        matches.push(match);
+    }
+
+    /**
+     * 为一个节点生成字段级匹配。每个匹配都保留详情目标 key，供上一条/下一条精确定位，
+     * 不再把“节点命中”与“树过滤”混成同一个概念。
+     */
+    function collectNodeSearchMatches(node, qLower, values, flatIdx, valueCache) {
+        var matches = [];
+        if (!node || !qLower) return matches;
+        addSearchMatch(matches, qLower, flatIdx, 'title', 'step', '步骤名称', node.title);
+        addSearchMatch(matches, qLower, flatIdx, 'step-id', 'step', 'Step ID', node.stepId);
+        addSearchMatch(matches, qLower, flatIdx, 'summary', 'step', '步骤摘要', node.summary);
+        addSearchMatch(matches, qLower, flatIdx, 'runner-key', 'step', 'Runner Key', node.runnerKey);
+
+        if (node.kind === 'loopIteration' && node.itemValue) {
+            addSearchMatch(matches, qLower, flatIdx, 'loop-item', 'value', '循环项值',
+                searchableValueText(node.itemValue, values, !!node.itemSensitive, valueCache));
+        }
+        if (node.kind === 'loopExit') {
+            addSearchMatch(matches, qLower, flatIdx, 'loop-exit', 'flow', '循环退出原因', node.loopExitReason);
+        }
+        if (node.kind === 'parallelScope') {
+            addSearchMatch(matches, qLower, flatIdx, 'parallel-wait', 'flow', '并行等待模式', node.waitMode);
+        }
+        if (node.kind === 'parallelBranch') {
+            addSearchMatch(matches, qLower, flatIdx, 'parallel-lane', 'flow', '并行分支', 'Lane ' + node.laneId);
+        }
+
+        for (var v = 0; v < (node.variableOutputs || []).length; v++) {
+            var variableOutput = node.variableOutputs[v];
+            addSearchMatch(matches, qLower, flatIdx, 'variable-output:' + v + ':target', 'output', '变量赋值目标', variableOutput.targetName,
+                { variableOutputIndex: v });
+            addSearchMatch(matches, qLower, flatIdx, 'variable-output:' + v + ':value', 'output', '变量赋值内容',
+                searchableValueText(variableOutput.value, values, !!variableOutput.sensitive, valueCache),
+                { variableOutputIndex: v });
+        }
+        var detail = node.detail;
+        if (!detail) return matches;
+        var i;
+        for (i = 0; i < (detail.inputs || []).length; i++) {
+            var input = detail.inputs[i];
+            addSearchMatch(matches, qLower, flatIdx, 'input:' + i + ':param', 'input', '输入参数', input.paramName,
+                { inputIndex: i });
+            addSearchMatch(matches, qLower, flatIdx, 'input:' + i + ':value', 'input', '选项', input.optionName,
+                { inputIndex: i });
+            addSearchMatch(matches, qLower, flatIdx, 'input:' + i + ':var', 'input', '变量引用', input.varName,
+                { inputIndex: i });
+            if (!input.sensitive) {
+                addSearchMatch(matches, qLower, flatIdx, 'input:' + i + ':expression', 'input', '表达式', input.expression,
+                    { inputIndex: i, pane: 'expr' });
+            }
+            addSearchMatch(matches, qLower, flatIdx, 'input:' + i + ':value', 'input', '输入值',
+                searchableValueText(input.value, values, !!input.sensitive, valueCache),
+                { inputIndex: i, pane: 'val' });
+        }
+        var latestOutputByKey = Object.create(null);
+        for (i = 0; i < (detail.outputs || []).length; i++) latestOutputByKey[outputGroupKey(detail.outputs[i])] = i;
+        for (i = 0; i < (detail.outputs || []).length; i++) {
+            var output = detail.outputs[i];
+            var isLatestTarget = latestOutputByKey[outputGroupKey(output)] === i;
+            if (isLatestTarget) {
+                addSearchMatch(matches, qLower, flatIdx, 'output:' + i + ':target', 'output', '输出目标', outputLabel(output),
+                    { outputIndex: i });
+                addSearchMatch(matches, qLower, flatIdx, 'output:' + i + ':kind', 'output', '输出类型', output.targetKind,
+                    { outputIndex: i });
+            }
+            addSearchMatch(matches, qLower, flatIdx, 'output:' + i + ':value', 'output', '输出值',
+                searchableValueText(output.value, values, !!output.sensitive, valueCache),
+                { outputIndex: i });
+        }
+        for (i = 0; i < (detail.messages || []).length; i++) {
+            addSearchMatch(matches, qLower, flatIdx, 'message:' + i, 'message', '消息', detail.messages[i].text,
+                { messageIndex: i });
+        }
+        if (detail.failure) {
+            var failure = detail.failure;
+            var diagnostic = failure.expressionDiagnostic;
+            addSearchMatch(matches, qLower, flatIdx, 'failure:message', 'failure', '失败信息',
+                diagnostic && diagnostic.message ? diagnostic.message : failure.message);
+            addSearchMatch(matches, qLower, flatIdx, 'failure:stack', 'failure', '异常堆栈', failure.stack);
+            if (diagnostic) {
+                addSearchMatch(matches, qLower, flatIdx, 'failure:diagnostic-source', 'failure', '表达式源码',
+                    diagnostic.sourceCode || diagnostic.codeSnippet);
+            }
+        }
+        return matches;
+    }
+
+    function collectSearchMatches(flat, query, values, statusMode, valueCache) {
+        var qLower = query ? String(query).toLowerCase() : '';
+        if (!qLower) return [];
+        var matches = [];
+        for (var i = 0; i < flat.length; i++) {
+            if (!nodeStatusMatches(flat[i].node, statusMode)) continue;
+            var nodeMatches = collectNodeSearchMatches(flat[i].node, qLower, values, i, valueCache);
+            for (var j = 0; j < nodeMatches.length; j++) matches.push(nodeMatches[j]);
+        }
+        return matches;
+    }
+
+    // 直接引用已有输入/输出；每个 source 都让出一次迭代，单步骤含大量写入也可分批处理。
+    function* variableAccessSources(flat) {
+        for (var f = 0; f < flat.length; f++) {
+            var node = flat[f].node, detail = node.detail || {};
+            var lists = [detail.inputs || [], detail.outputs || [], node.variableOutputs || []];
+            for (var list = 0; list < lists.length; list++) {
+                for (var i = 0; i < lists[list].length; i++)
+                    yield { flatIdx: f, item: lists[list][i], source: list === 0 ? 'input' : 'output', itemIndex: i };
+            }
+            // 空步骤也提供协作调度边界，避免只有结构、没有变量的大树一次遍历到底。
+            yield null;
+        }
+    }
+
+    function* variableRecordsFromSource(source, records) {
+        if (!source) return;
+        var item = source.item, names = [], kind;
+        if (source.source === 'output') {
+            if (item.targetKind !== 'Variable' || !item.targetName) return;
+            kind = 'write'; names.push(item.targetName);
+        } else if (item.origin === 'state' && item.varName) {
+            kind = 'write'; names.push(item.varName);
+        } else if (item.origin === 'variable' && item.varName) {
+            kind = 'read'; names.push(item.varName);
+        } else if (!item.sensitive && (item.origin === 'expression' || item.origin === 'interpolation') && item.expression) {
+            kind = 'reference';
+            // 按字符分块，连单个巨大表达式或没有匹配的长文本也提供取消/让出边界。
+            var expression = item.expression, open = -1, seen = new Set();
+            for (var c = 0; c < expression.length; c++) {
+                var ch = expression[c];
+                if (ch === '{') open = c + 1;
+                else if (ch === '\r' || ch === '\n') open = -1;
+                else if (ch === '}') {
+                    if (open >= 0 && c > open) {
+                        var name = expression.slice(open, c);
+                        // 排除明显的代码块/格式占位符，不要求变量必须发生过实际读写。
+                        if (!/[\s;()]|^\d+$/.test(name) && !seen.has(name)) { seen.add(name); names.push(name); }
+                    }
+                    open = -1;
+                }
+                if ((c & 2047) === 2047) yield null;
+            }
+        }
+        for (var n = 0; n < names.length; n++) {
+            records.push({
+                flatIdx: source.flatIdx, name: names[n], kind: kind,
+                scopeId: item.variableScopeId == null ? 'unknown' : String(item.variableScopeId),
+                item: item, source: source.source, itemIndex: source.itemIndex, order: records.length
+            });
+            if ((n & 255) === 255) yield null;
+        }
+    }
+
+    function compareVariableAccesses(a, b) {
+        var left = a.item.sequence, right = b.item.sequence;
+        if (left != null && right != null && left !== right) return left - right;
+        // 缺少序号的旧包排在已记录事件之后，保持比较器传递性。
+        if ((left == null) !== (right == null)) return left == null ? 1 : -1;
+        return a.order - b.order;
+    }
+
+    function collectVariableAccesses(flat) {
+        var records = [];
+        for (var source of variableAccessSources(flat)) for (var part of variableRecordsFromSource(source, records)) { /* 同步兼容入口 */ }
+        return records.sort(compareVariableAccesses);
+    }
+
+    function filterVariableAccesses(records, name, mode, scopeId) {
+        return records.filter(function (record) {
+            return (!scopeId || record.scopeId === String(scopeId)) && (!name || record.name === name) &&
+                (!mode || mode === 'all' || (mode === 'read' ? record.kind !== 'write' : record.kind === mode));
+        });
+    }
+
+    // 候选来源在索引完成后保持不变；翻页/切换读写模式复用上一次筛选。
+    function createVariableCandidateSelector(useValues) {
+        var previousSource, previousNeedle, previousResult;
+        return function (source, text) {
+            var needle = text.toLowerCase();
+            if (source === previousSource && needle === previousNeedle) return previousResult;
+            var result = [];
+            if (source) for (var candidate of (useValues ? source.values() : source.keys())) {
+                if (!needle || candidate.toLowerCase().indexOf(needle) >= 0) result.push(candidate);
+                if (result.length >= 100) break;
+            }
+            previousSource = source; previousNeedle = needle; previousResult = result;
+            return result;
+        };
+    }
+    function variableAccessSource(index, scopeId, name) {
+        if (scopeId && !index.scopes.has(String(scopeId))) return [];
+        return scopeId && name ? index.scopes.get(String(scopeId)).get(name) || [] : index.all;
+    }
+    function variableAccessMatches(record, scopeId, name, mode) {
+        return (!scopeId || record.scopeId === String(scopeId)) && (!name || record.name === name) &&
+            (!mode || mode === 'all' || (mode === 'read' ? record.kind !== 'write' : record.kind === mode));
+    }
+    function lookupVariableAccesses(index, scopeId, name, mode) {
+        var source = variableAccessSource(index, scopeId, name);
+        if ((!scopeId && !name || scopeId && name) && (!mode || mode === 'all')) return source;
+        return source.filter(function (record) { return variableAccessMatches(record, scopeId, name, mode); });
+    }
+    async function lookupVariableAccessesAsync(index, scopeId, name, mode, cancelled, yieldTask) {
+        var source = variableAccessSource(index, scopeId, name), result = [], nextYield;
+        cancelled = cancelled || function () { return false; };
+        yieldTask = yieldTask || function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); };
+        await yieldTask(); nextYield = performance.now() + 8;
+        for (var i = 0; i < source.length; i++) {
+            if ((i & 255) === 0) {
+                if (cancelled()) throw new Error('variable-filter-cancelled');
+                if (performance.now() >= nextYield) { await yieldTask(); nextYield = performance.now() + 8; }
+            }
+            if (variableAccessMatches(source[i], scopeId, name, mode)) result.push(source[i]);
+        }
+        if (cancelled()) throw new Error('variable-filter-cancelled');
+        return result;
+    }
+
+    async function buildVariableIndexAsync(flat, onProgress, cancelled, yieldTask) {
+        var records = [], processed = 0, nextYield = performance.now() + 8;
+        yieldTask = yieldTask || function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); };
+        cancelled = cancelled || function () { return false; };
+        async function checkpoint(phase) {
+            if (cancelled()) throw new Error('variable-index-cancelled');
+            if (performance.now() < nextYield) return;
+            if (onProgress) onProgress(phase);
+            await yieldTask();
+            nextYield = performance.now() + 8;
+            if (cancelled()) throw new Error('variable-index-cancelled');
+        }
+        // 先让页面显示加载状态，再开始处理；关闭面板可取消所有后续工作。
+        await yieldTask();
+        if (cancelled()) throw new Error('variable-index-cancelled');
+        for (var source of variableAccessSources(flat)) {
+            for (var part of variableRecordsFromSource(source, records)) await checkpoint('读取变量记录');
+            if ((++processed & 255) === 0) await checkpoint('读取变量记录');
+        }
+        // 分批归并排序。避免大型循环/并行报告的一次原生 sort 长时间占住 UI 线程。
+        var buffer = new Array(records.length), work = 0;
+        for (var width = 1; width < records.length; width *= 2) {
+            for (var start = 0; start < records.length; start += width * 2) {
+                var mid = Math.min(start + width, records.length), end = Math.min(start + width * 2, records.length);
+                var left = start, right = mid;
+                for (var out = start; out < end; out++) {
+                    buffer[out] = right >= end || (left < mid && compareVariableAccesses(records[left], records[right]) <= 0)
+                        ? records[left++] : records[right++];
+                    if ((++work & 1023) === 0) await checkpoint('整理事件顺序');
+                }
+            }
+            var swap = records; records = buffer; buffer = swap;
+        }
+        // 总表直接复用排序结果，排序缓冲区不再陪伴后续建索引阶段。
+        buffer = null;
+        var index = { all: records, scopes: new Map(), names: new Set() };
+        for (var r = 0; r < records.length; r++) {
+            var record = records[r], scope = index.scopes.get(record.scopeId);
+            if (!scope) { scope = new Map(); index.scopes.set(record.scopeId, scope); }
+            var named = scope.get(record.name);
+            if (!named) { named = []; scope.set(record.name, named); }
+            named.push(record); index.names.add(record.name);
+            if ((r & 255) === 0) await checkpoint('建立作用域索引');
+        }
+        if (cancelled()) throw new Error('variable-index-cancelled');
+        return index;
+    }
+
+    function variablePanelHeight(preferred, available) {
+        available = Math.max(0, available);
+        var max = Math.max(0, available - Math.min(120, available * 0.4));
+        return Math.max(Math.min(120, max), Math.min(preferred, max));
+    }
+
+    function variableAccessLabel(kind) {
+        return kind === 'write' ? '赋值' : kind === 'reference' ? '表达式引用' : '读取';
+    }
+    function variableListPreview(text) {
+        text = String(text == null ? '*NULL*' : text);
+        return text.length > 200 ? text.slice(0, 200) + '…' : text;
+    }
+    function variableParameterMatch(node, record) {
+        var detail = node.detail || {}, index = record.itemIndex;
+        if (record.source === 'input' && detail.inputs && detail.inputs[index] === record.item)
+            return { key: 'input:' + index + (record.kind === 'reference' && !record.item.sensitive ? ':expression' : ':value'), inputIndex: index };
+        if (record.source === 'output' && detail.outputs && detail.outputs[index] === record.item)
+            return { key: 'output:' + index + ':value', outputIndex: index };
+        return null;
+    }
+
+    /** 每个节点自身/子树的匹配数；折叠祖先可用 subtreeCounts 标记内部仍有结果。 */
+    function buildSearchMatchCounts(flat, matches) {
+        var ownCounts = Object.create(null), subtreeCounts = Object.create(null), hitIndices = new Set();
+        for (var i = 0; i < matches.length; i++) {
+            var flatIdx = matches[i].flatIdx;
+            ownCounts[flatIdx] = (ownCounts[flatIdx] || 0) + 1;
+            hitIndices.add(flatIdx);
+            var current = flatIdx;
+            while (current >= 0) {
+                subtreeCounts[current] = (subtreeCounts[current] || 0) + 1;
+                current = flat[current].parent;
+            }
+        }
+        return { ownCounts: ownCounts, subtreeCounts: subtreeCounts, hitIndices: hitIndices };
+    }
+
+    /**
+     * 派生左树可见节点下标序列。
+     * - 搜索不参与可见性，只返回命中集供兼容调用；左树始终保留原结构和折叠状态。
+     * - 状态过滤仍保留命中节点及其祖先，便于查看失败/取消等子树上下文。
+     */
+    function computeVisible(flat, collapsed, statusMode, query) {
+        var n = flat.length;
+        var q = query ? String(query).toLowerCase() : '';
+        var filtering = statusMode && statusMode !== 'all';
+        var keep = new Uint8Array(n);
+        var hits = q ? new Set() : null;
+        var i, out = [];
+
+        if (q) for (i = 0; i < n; i++) if (nodeMatchesSearch(flat[i].node, q)) hits.add(i);
+
+        if (!filtering) {
+            var hideBelow = Infinity;
+            for (i = 0; i < n; i++) {
+                var d = flat[i].depth;
+                if (d > hideBelow) continue;          // 被已折叠祖先隐藏
+                hideBelow = Infinity;                 // 到达不深于阈值的行 → 隐藏区结束
+                if (flat[i].collapsible && collapsed.has(flat[i].node.id)) hideBelow = d;
+                keep[i] = 1;
+            }
+        } else {
+            for (i = 0; i < n; i++) {
+                var node = flat[i].node;
+                if (nodeStatusMatches(node, statusMode)) {
+                    keep[i] = 1;
+                    var p = flat[i].parent;
+                    while (p >= 0 && !keep[p]) { keep[p] = 1; p = flat[p].parent; }
+                }
+            }
+        }
+        for (i = 0; i < n; i++) if (keep[i]) out.push(i);
+        return { indices: out, hits: hits };
+    }
+
+    /** 从 fromIdx 之后（环绕）找到下一个满足 pred 的扁平下标；无则 -1。 */
+    function findNextIndex(flat, pred, fromIdx) {
+        var n = flat.length;
+        for (var k = 1; k <= n; k++) {
+            var i = ((fromIdx + k) % n + n) % n;
+            if (pred(flat[i].node)) return i;
+        }
+        return -1;
+    }
+
+    /** 在当前可见节点中查找相邻项；到达首尾后停留，不循环。 */
+    function findVisibleNeighbor(visible, selectedFlatIdx, direction) {
+        if (!visible || !visible.length) return -1;
+        var pos = visible.indexOf(selectedFlatIdx);
+        if (pos < 0) return direction < 0 ? visible[visible.length - 1] : visible[0];
+        var next = pos + direction;
+        return next >= 0 && next < visible.length ? visible[next] : selectedFlatIdx;
+    }
+
+    /** candidate 是否为 ancestor 的后代（不含 ancestor 自身）。 */
+    function isDescendantOf(flat, candidate, ancestor) {
+        if (!flat || candidate < 0 || candidate >= flat.length || ancestor < 0 || ancestor >= flat.length) return false;
+        var parent = flat[candidate].parent;
+        while (parent >= 0) {
+            if (parent === ancestor) return true;
+            parent = flat[parent].parent;
+        }
+        return false;
+    }
+
+    /** 折叠祖先会隐藏当前选择时，把选择收回到该祖先。 */
+    function selectionAfterCollapse(flat, selectedFlatIdx, collapsedFlatIdx) {
+        return isDescendantOf(flat, selectedFlatIdx, collapsedFlatIdx) ? collapsedFlatIdx : selectedFlatIdx;
+    }
+
+    /** step 节点是否失败。 */
+    function isFailedNode(node) { return node.status === 'failed'; }
+
+    /** 是否含需要用户关注的警告/错误消息。 */
+    function hasAttentionMessage(node) {
+        var messages = node && node.detail && node.detail.messages;
+        if (!messages) return false;
+        for (var i = 0; i < messages.length; i++) {
+            if (messages[i].level === 'warning' || messages[i].level === 'error') return true;
+        }
+        return false;
+    }
+
+    /** 失败、未完成、已取消、失败详情或警告/错误消息均属于“需关注”。 */
+    function isAttentionNode(node) {
+        if (!node) return false;
+        if (node.status === 'failed' || node.status === 'incomplete' || node.status === 'canceled') return true;
+        if (node.detail && node.detail.failure) return true;
+        return hasAttentionMessage(node);
+    }
+
+    /** 报告摘要计数，供首屏诊断概览使用。 */
+    function summarizeFlat(flat) {
+        var result = {
+            nodes: flat.length, steps: 0, failed: 0, incomplete: 0, canceled: 0,
+            skipped: 0, warnings: 0, errors: 0, attention: 0
+        };
+        for (var i = 0; i < flat.length; i++) {
+            var node = flat[i].node;
+            if (node.kind === 'step') result.steps++;
+            if (node.status === 'failed') result.failed++;
+            else if (node.status === 'incomplete') result.incomplete++;
+            else if (node.status === 'canceled') result.canceled++;
+            else if (node.status === 'skipped') result.skipped++;
+            if (isAttentionNode(node)) result.attention++;
+            var messages = node.detail && node.detail.messages;
+            if (messages) for (var m = 0; m < messages.length; m++) {
+                if (messages[m].level === 'warning') result.warnings++;
+                else if (messages[m].level === 'error') result.errors++;
+            }
+        }
+        return result;
+    }
+
+    /** 最慢步骤（仅实际步骤，不把动作根/循环容器混入）。 */
+    function topSlowSteps(flat, limit) {
+        var rows = [];
+        for (var i = 0; i < flat.length; i++) {
+            var node = flat[i].node;
+            if (node.kind === 'step' && node.durationMs !== null && node.durationMs !== undefined) {
+                rows.push({ flatIdx: i, node: node });
+            }
+        }
+        rows.sort(function (a, b) { return b.node.durationMs - a.node.durationMs; });
+        return rows.slice(0, limit || 10);
+    }
+
+    function subtreeHasAttention(node) {
+        if (isAttentionNode(node)) return true;
+        var kids = node.children || [];
+        for (var i = 0; i < kids.length; i++) if (subtreeHasAttention(kids[i])) return true;
+        return false;
+    }
+
+    /** 循环控制节点的迭代摘要：次数、问题迭代、平均/最慢耗时。 */
+    function summarizeLoopIterations(node) {
+        var kids = (node && node.children) || [];
+        var result = {
+            count: 0, problemCount: 0, durationCount: 0, totalDurationMs: 0,
+            averageDurationMs: null, slowest: null, firstProblem: null
+        };
+        for (var i = 0; i < kids.length; i++) {
+            var iteration = kids[i];
+            if (iteration.kind !== 'loopIteration') continue;
+            result.count++;
+            if (subtreeHasAttention(iteration)) {
+                result.problemCount++;
+                if (!result.firstProblem) result.firstProblem = iteration;
+            }
+            if (iteration.durationMs !== null && iteration.durationMs !== undefined) {
+                result.durationCount++;
+                result.totalDurationMs += iteration.durationMs;
+                if (!result.slowest || iteration.durationMs > result.slowest.durationMs) result.slowest = iteration;
+            }
+        }
+        if (result.durationCount) result.averageDurationMs = result.totalDurationMs / result.durationCount;
+        return result;
+    }
+
+    function outputLabel(output) {
+        var target = output.targetName || '(输出)';
+        return output.paramName ? output.paramName + ' → ' + target : target;
+    }
+
+    function outputGroupKey(output) {
+        return JSON.stringify([output.paramKey || output.paramName || '', output.targetKind || '', output.targetName || '', output.variableScopeId == null ? 'unknown' : output.variableScopeId]);
+    }
+
+    /** 同一参数写同一目标的多次写入归为一组，默认只展示最终值。 */
+    function groupOutputs(outputs) {
+        var groups = [], byKey = Object.create(null);
+        for (var i = 0; i < (outputs || []).length; i++) {
+            var output = outputs[i];
+            var key = outputGroupKey(output);
+            var group = byKey[key];
+            if (!group) {
+                group = { key: key, targetName: output.targetName, targetKind: output.targetKind, items: [] };
+                byKey[key] = group;
+                groups.push(group);
+            }
+            group.items.push(output);
+        }
+        return groups;
+    }
+
+    function createVariableScopeLabeler(scopes, flat, flatIndexById) {
+        var definitions = new Map(), labels = new Map();
+        (scopes || []).forEach(function (scope) { definitions.set(String(scope.id), scope); });
+        return function (id) {
+            id = id == null ? 'unknown' : String(id);
+            if (labels.has(id)) return labels.get(id);
+            var scope = definitions.get(id), label;
+            if (id === 'unknown') label = '历史记录（作用域未知）';
+            else if (!scope) label = '变量环境 #' + id + '（来源未记录）';
+            else if (scope.parentId == null) label = '主程序（环境 ' + id + '）';
+            else {
+                var flatIdx = flatIndexById[scope.callNodeId], node = flatIdx === undefined ? null : flat[flatIdx].node;
+                label = (node ? '#' + (node.stepId || '') + ' ' + (node.title || '局部环境') + (node.summary ? ' · ' + node.summary : '') : '局部环境') + '（独立环境 ' + id + '）';
+            }
+            labels.set(id, label);
+            return label;
+        };
+    }
+
+    // 报告模型在查看期间不可变；按输出数组缓存分组，不在每次展开或搜索时重新扫描全部写入。
+    function groupVariableWrites(outputs, cache) {
+        if (cache && cache.has(outputs)) return cache.get(outputs);
+        var groups = [], byKey = new Map(), writeCount = 0;
+        for (var i = 0; i < outputs.length; i++) {
+            var item = outputs[i];
+            // 循环还会迁入 None/Clipboard/DictKey 等普通输出，与全局变量索引使用相同识别条件。
+            if (item.targetKind !== 'Variable' || !item.targetName) continue;
+            writeCount++;
+            var key = JSON.stringify([item.targetKind, item.targetName, item.variableScopeId == null ? 'unknown' : item.variableScopeId]);
+            var group = byKey.get(key);
+            if (!group) { group = { items: [] }; byKey.set(key, group); groups.push(group); }
+            group.items.push({ item: item, index: i });
+        }
+
+        // 合并循环输出时数组可能乱序。已知事件按序号排序；旧包缺序号保留存储顺序，
+        // 混合时优先已知序号选取最后记录，不把无序号项推断为更晚的事件。
+        groups.forEach(function (group) {
+            group.hasUnknownSequence = group.items.some(function (entry) { return entry.item.sequence == null; });
+            group.items.sort(function (a, b) {
+                var left = a.item.sequence, right = b.item.sequence;
+                if (left != null && right != null && left !== right) return left - right;
+                if ((left == null) !== (right == null)) return left == null ? -1 : 1;
+                return a.index - b.index;
+            });
+        });
+        var result = { groups: groups, writeCount: writeCount };
+        if (cache) cache.set(outputs, result);
+        return result;
+    }
+
+    // 摘要只建立短预览 DOM；完整值复用按记录选择的详情，避免大量长值首次全部展开。
+    function variableWriteSummary(outputs, values, limit, histories, scopeLabel, cache) {
+        if (!outputs || !outputs.length) return '';
+        var grouped = groupVariableWrites(outputs, cache), groups = grouped.groups, writeCount = grouped.writeCount;
+        if (!writeCount) return '';
+        function previewRow(entry, label) {
+            var item = entry.item, resolved = resolveValue(item.value, values);
+            var text = item.value && item.value.preview;
+            if (item.sensitive || resolved.kind === 'masked') text = '******';
+            else if (text == null) {
+                if (resolved.kind === 'full') text = resolved.content;
+                else if (resolved.kind === 'inline') text = resolved.text;
+                else if (resolved.kind === 'attachment') text = '（附件，点击查看）';
+            }
+            return '<button class="qk-write-preview" data-extra-index="' + entry.index + '" title="查看完整值">' +
+                '<span>' + esc(label) + '</span><code>' + esc(variableListPreview(text)) + '</code></button>';
+        }
+        var h = '<section class="qk-section qk-write-summary"><h3 tabindex="-1">额外变量赋值 · ' + writeCount + ' 条</h3>';
+        for (var g = 0; g < Math.min(groups.length, limit); g++) {
+            var entries = groups[g].items, last = entries[entries.length - 1], item = last.item;
+            var scopeId = item.variableScopeId == null ? 'unknown' : String(item.variableScopeId);
+            var scope = scopeLabel ? scopeLabel(scopeId) : (scopeId === 'unknown' ? '作用域未知' : '变量环境 #' + scopeId);
+            var ordering = item.sequence == null ? '按存储顺序显示最后记录' :
+                (groups[g].hasUnknownSequence ? '按已知序号显示最后记录' : '当前为最后一次记录的值');
+            h += '<div class="qk-write-group" data-extra-group="' + g + '">' + previewRow(last, (item.targetName || '(输出)')) +
+                '<div class="qk-vmeta">' + esc(scope) + (entries.length > 1 ? ' · 赋值 ' + entries.length + ' 次，' + ordering : '') + '</div>';
+            if (entries.length > 1) {
+                var count = histories.get(g) || 0;
+                h += '<button class="qk-variable-link" data-extra-history="' + g + '" data-extra-count="' + (count ? 0 : 20) + '">' +
+                    (count ? '收起历史' : '查看赋值历史') + '</button>';
+                if (count) {
+                    h += '<div class="qk-write-history">';
+                    for (var j = 0; j < Math.min(count, entries.length); j++) h += previewRow(entries[j], '记录 ' + (j + 1) + (entries[j].item.sequence == null ? '（序号未记录）' : ''));
+                    if (count < entries.length) h += '<button class="qk-variable-link" data-extra-history-more data-extra-history="' + g + '" data-extra-count="' + (count + 20) + '">显示更多历史</button>';
+                    h += '</div>';
+                }
+            }
+            h += '</div>';
+        }
+        if (groups.length > limit) h += '<button class="qk-variable-link" data-extra-more>显示更多变量（还有 ' + (groups.length - limit) + ' 项）</button>';
+        return h + '<div class="qk-variable-note"><button class="qk-variable-link" data-variable-open="write">打开变量读写查看</button></div></section>';
+    }
+
+    /**
+     * 求值值单元 → 详情面板可渲染描述。
+     * kind: null（无值）| inline（preview 即全文）| full（从 values 取 content 全文）| masked（脱敏）| attachment（附件链接）。
+     */
+    function resolveValue(cell, values) {
+        if (!cell) return { kind: 'null' };
+        var preview = (cell.preview === null || cell.preview === undefined) ? null : cell.preview;
+        if (!cell.ref) {
+            return preview === null ? { kind: 'null' } : { kind: 'inline', text: preview };
+        }
+        var s = values && values[cell.ref];
+        if (!s) return { kind: 'inline', text: preview === null ? '' : preview, note: '值引用缺失，仅内联预览可用' };
+        if (s.sensitive) return { kind: 'masked', typeName: s.typeName };
+        if (s.attachmentRef) return { kind: 'attachment', attachmentRef: s.attachmentRef, typeName: s.typeName };
+        return {
+            kind: 'full',
+            content: (s.content !== null && s.content !== undefined) ? s.content : (preview === null ? '' : preview),
+            typeName: s.typeName,
+            // 截断提示看【内容】是否截断(contentTruncated)，不是【预览】截断(truncated)——
+            // 详情面板展示的是完整 content(≤硬上限)，>256 的值预览必截断但内容往往完整，不应误报。
+            truncated: !!s.contentTruncated
+        };
+    }
+
+    /** 输入来源标注文案：value→【值】；variable→【变量 X】；expression→【表达式】；interpolation→【插值模板】；clipboard→【剪贴板】；state→【状态 X】。 */
+    function originLabel(origin, varName) {
+        if (origin === 'variable') return '【变量 ' + varName + '】';
+        if (origin === 'expression') return '【表达式】';
+        if (origin === 'interpolation') return '【插值模板】';
+        if (origin === 'clipboard') return '【剪贴板】';
+        if (origin === 'state') return '【状态 ' + (varName || '') + '】';
+        return '【值】';
+    }
+
+    /** 表达式侧分段控件的标签（与 origin 对应）：变量→变量引用；插值→模板；其余→表达式。 */
+    function exprTabLabel(origin) {
+        if (origin === 'variable') return '变量引用';
+        if (origin === 'interpolation') return '模板';
+        return '表达式';
+    }
+
+    /** 从 ISO 时间串解析时区偏移（分钟）；Z→0；无偏移→null。 */
+    function parseOffsetMin(iso) {
+        if (!iso) return null;
+        if (/Z$/.test(iso)) return 0;
+        var m = /([+-])(\d{2}):(\d{2})$/.exec(iso);
+        if (!m) return null;
+        return (m[1] === '-' ? -1 : 1) * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+    }
+    function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+    function pad3(n) { return n < 10 ? '00' + n : (n < 100 ? '0' + n : '' + n); }
+
+    /** curr-time：startedUtc + elapsedMs → 原时区墙钟 HH:mm:ss.fff。 */
+    function fmtTimeTitle(startedUtc, elapsedMs) {
+        var t = Date.parse(startedUtc);
+        if (isNaN(t)) return '';
+        var off = parseOffsetMin(startedUtc);
+        if (off === null) off = -new Date().getTimezoneOffset();
+        var d = new Date(t + (elapsedMs || 0) + off * 60000);
+        return pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds()) + '.' + pad3(d.getUTCMilliseconds());
+    }
+
+    /** 耗时格式化：>=1s → x.xxs；否则 xx.xms（小值 2 位、大值 1 位小数）。 */
+    function fmtDur(ms) {
+        if (ms === null || ms === undefined) return '';
+        if (ms >= 1000) return (ms / 1000).toFixed(2) + 's';
+        return ms.toFixed(ms < 10 ? 2 : 1) + 'ms';
+    }
+
+    /** 在已转义 html 中把（已转义的）查询词包裹为高亮 span。 */
+    function markHits(html, qEscLower) {
+        if (!qEscLower) return html;
+        var lower = html.toLowerCase(), out = '', i = 0, idx;
+        while ((idx = lower.indexOf(qEscLower, i)) >= 0) {
+            out += html.slice(i, idx) + '<span class="qk-mark">' + html.slice(idx, idx + qEscLower.length) + '</span>';
+            i = idx + qEscLower.length;
+        }
+        return out + html.slice(i);
+    }
+
+    // ==================== DOM 渲染 / 交互（浏览器） ====================
+
+    var ROW_H = 24;      // 左树行高（px，定高虚拟列表）
+    var INDENT = 14;     // 每层缩进 px
+    var OVERSCAN = 6;    // 视口上下多渲染的行数
+
+    function statusMeta(status) {
+        switch (status) {
+            case 'success': return { icon: '✓', cls: 'qk-icon-success', label: '成功', badge: 'qk-badge-success' };
+            case 'failed': return { icon: '✗', cls: 'qk-icon-failed', label: '失败', badge: 'qk-badge-failed' };
+            case 'skipped': return { icon: '⊘', cls: 'qk-icon-skipped', label: '已跳过', badge: 'qk-badge-skipped' };
+            case 'incomplete': return { icon: '⚠', cls: 'qk-icon-incomplete', label: '未完成', badge: 'qk-badge-incomplete' };
+            case 'canceled': return { icon: '⊗', cls: 'qk-icon-canceled', label: '已取消', badge: 'qk-badge-canceled' };
+            default: return null;
+        }
+    }
+    function containerIcon(kind) {
+        switch (kind) {
+            case 'actionRoot': return '▣';
+            case 'loop': case 'loopIteration': return '↻';
+            case 'loopExit': return '⏹';
+            case 'scope': return '▤';
+            case 'parallelScope': return '⇉';
+            case 'parallelBranch': return '┃';
+            default: return '•';
+        }
+    }
+
+    function bootViewer() {
+        var dataEl = document.getElementById('quicker-debug-data');
+        if (!dataEl) return;
+        var MODEL;
+        try { MODEL = JSON.parse(dataEl.textContent); }
+        catch (e) { document.body.innerHTML = '<div style="padding:12px;color:#c00">调试数据解析失败：' + esc(e && e.message) + '</div>'; return; }
+
+        var META = MODEL.meta || {};
+        var VALUES = MODEL.values || {};
+        var FLAT = flattenTree(MODEL.tree || []);
+        var variableIndex = null;
+        var variableIndexRun = 0;
+        var variableIndexLoading = false;
+        var variableFilterRun = 0, variableQueryCache = null;
+        var variableScopeLabels = new Map();
+        var variableScopeIdsByLabel = new Map();
+        var activeVariableAccess = null;
+        var extraVariableLimit = 8, extraVariableHistories = new Map(), extraVariableGroups = new WeakMap();
+        var variablePage = 0;
+        var variablePageSize = 50;
+        var filteredVariableAccesses = [];
+        var pendingVariableSelection = null;
+        var variablePanelPreferredHeight = 280;
+        var stopVariablePanelDrag = null;
+        var activeVariablePicker = null;
+        var variablePickerOptions = Object.create(null);
+        var activeVariableOption = -1;
+        var suppressVariablePickerFocus = false;
+
+        // ---- 主题（暗色模式，默认跟随系统）----
+        // 三态：'system'（跟随系统，移除 data-theme 交回 media query）/ 'light' / 'dark'。
+        // 持久化用 localStorage（file:// 可能不支持，try/catch 包住，失败静默）。
+        var THEME_KEY = 'qk-debug-theme';
+        function readTheme() {
+            try {
+                var v = localStorage.getItem(THEME_KEY);
+                if (v === 'light' || v === 'dark' || v === 'system') return v;
+            } catch (e) { /* file:// 或隐私模式：忽略 */ }
+            return 'system';
+        }
+        function applyTheme(mode) {
+            var el = document.documentElement;
+            // 手动“浅色/深色”→ 设 data-theme（覆盖 media，手动优先）；“跟随系统”→ 移除属性交回 media query。
+            if (mode === 'light' || mode === 'dark') el.setAttribute('data-theme', mode);
+            else el.removeAttribute('data-theme');
+        }
+        function saveTheme(mode) {
+            try { localStorage.setItem(THEME_KEY, mode); } catch (e) { /* 失败静默 */ }
+        }
+        var themeMode = readTheme();
+        applyTheme(themeMode);   // 尽早应用，避免主题闪烁（data-theme 设在 <html> 上，不受 body 重建影响）
+
+        var collapsed = createDefaultCollapsed(FLAT);
+        var statusMode = 'all';
+        var query = '';
+        var qEscLower = '';
+        var selectedFlatIdx = -1;
+        var expandedOutputGroups = new Set();
+        var searchMatches = [];
+        var currentSearchMatch = -1;
+        var ownMatchCounts = Object.create(null);
+        var subtreeMatchCounts = Object.create(null);
+        var searchValueCache = Object.create(null);
+        var autoExpandedForSearch = new Set();
+        var flatIndexById = Object.create(null);
+        for (var flatPos = 0; flatPos < FLAT.length; flatPos++) {
+            flatIndexById[FLAT[flatPos].node.id] = flatPos;
+        }
+
+        var scopeLabelForId = createVariableScopeLabeler(MODEL.variableScopes, FLAT, flatIndexById);
+
+        var visible = [];   // 可见节点的扁平下标序列（搜索不改变它）
+        var hits = null;    // 搜索命中的节点下标，仅用于标记
+        var copyTexts = []; // 当前详情面板内复制按钮的文本载荷（每次渲染重置）
+
+        // ---- 容器/步骤节点显示名（纯文本，调用方负责 esc） ----
+        function containerLabelPlain(node) {
+            switch (node.kind) {
+                case 'actionRoot': return META.actionName || node.title || '动作';
+                case 'loopIteration': return '第 ' + node.iterationNumber + ' 次循环';
+                case 'loopExit': return '第 ' + node.iterationNumber + ' 次开始前检查：条件满足，提前结束循环';
+                case 'loop': return '循环';
+                case 'scope': return '作用域';
+                case 'parallelScope': return '并行区（' + (node.waitMode || '') + '，' + (node.branchCount || 0) + ' 分支）';
+                case 'parallelBranch': return 'Lane ' + node.laneId;
+                default: return node.title || node.kind;
+            }
+        }
+        function nodeLabelText(node) {
+            if (node.kind === 'step') return node.title || '';
+            var label = containerLabelPlain(node);
+            // F2：循环迭代标签前置显示"这次处理的项"——"第 N 次循环：<项值 preview>"（脱敏恒掩码）。
+            if (node.kind === 'loopIteration' && node.itemValue) {
+                label += '：' + itemPreviewText(node);
+            }
+            return label;
+        }
+
+        // 循环项值的短预览（旧报告 sensitive→掩码；无 preview→空）；供树标签前置显示。
+        function itemPreviewText(node) {
+            if (node.itemSensitive) return '******';
+            var p = node.itemValue && node.itemValue.preview;
+            return (p === null || p === undefined) ? '' : p;
+        }
+
+        // ---- 页面骨架 ----
+        document.body.innerHTML =
+            '<div id="qk-toolbar"></div>' +
+            '<div id="qk-report-info"></div>' +
+            '<div id="qk-summary"></div>' +
+            '<div id="qk-banners"></div>' +
+            '<section id="qk-variables" aria-label="变量读写" hidden></section>' +
+            '<div id="qk-variable-splitter" role="separator" aria-label="调整变量读写区域高度" title="拖动调整变量读写区域高度" aria-orientation="horizontal" tabindex="0" hidden></div>' +
+            '<div id="qk-variable-candidates" role="listbox" hidden></div>' +
+            '<div id="qk-main">' +
+            '  <div id="qk-tree-pane"><div id="qk-tree-scroll" tabindex="0" role="tree" aria-label="执行步骤树"><div id="qk-tree-spacer"><div id="qk-tree-rows"></div></div></div></div>' +
+            '  <div id="qk-splitter"></div>' +
+            '  <div id="qk-detail-pane"></div>' +
+            '</div>';
+
+        var toolbarEl = document.getElementById('qk-toolbar');
+        var reportInfoEl = document.getElementById('qk-report-info');
+        var summaryEl = document.getElementById('qk-summary');
+        var bannersEl = document.getElementById('qk-banners');
+        var treePaneEl = document.getElementById('qk-tree-pane');
+        var scrollEl = document.getElementById('qk-tree-scroll');
+        var spacerEl = document.getElementById('qk-tree-spacer');
+        var rowsEl = document.getElementById('qk-tree-rows');
+        var splitterEl = document.getElementById('qk-splitter');
+        var detailEl = document.getElementById('qk-detail-pane');
+
+        var variableEl = document.getElementById('qk-variables');
+        var variableSplitterEl = document.getElementById('qk-variable-splitter');
+        var variableCandidatesEl = document.getElementById('qk-variable-candidates');
+        buildToolbar();
+        buildVariablePanel();
+        buildReportInfo();
+        buildSummary();
+        buildBanners();
+        wireSplitter();
+        wireVariablePanelSplitter();
+        wireVariablePickers();
+
+        scrollEl.addEventListener('scroll', requestRender);
+        scrollEl.addEventListener('keydown', onTreeKeyDown);
+        window.addEventListener('resize', function () { fitVariablePanel(); hideVariablePicker(); requestRender(); });
+        rowsEl.addEventListener('click', onTreeClick);
+        summaryEl.addEventListener('click', onSummaryClick);
+        detailEl.addEventListener('click', onDetailClick);
+
+        rebuildVisible();
+        // 默认优先选中实际问题步骤；只有问题仅存在于动作根时才选根节点。
+        var firstAttention = -1;
+        for (var attentionIndex = 0; attentionIndex < FLAT.length; attentionIndex++) {
+            if (FLAT[attentionIndex].node.kind === 'step' && isAttentionNode(FLAT[attentionIndex].node)) {
+                firstAttention = attentionIndex;
+                break;
+            }
+        }
+        if (firstAttention < 0) firstAttention = indexOfAttention();
+        selectByFlatIdx(firstAttention >= 0 ? firstAttention : (FLAT.length ? 0 : -1), true);
+        scrollEl.focus();
+
+        function setVariablePanelOpen(open) {
+            variableEl.hidden = !open;
+            variableSplitterEl.hidden = !open;
+            hideVariablePicker();
+            if (open) fitVariablePanel();
+            else if (stopVariablePanelDrag) stopVariablePanelDrag();
+            toolbarEl.querySelector('#qk-variable-toggle').setAttribute('aria-expanded', String(open));
+            requestRender();
+            if (!open) {
+                variableIndexRun++; variableIndexLoading = false; variableFilterRun++;
+                return;
+            }
+            suppressVariablePickerFocus = true;
+            document.getElementById('qk-variable-scope').focus();
+            suppressVariablePickerFocus = false;
+            if (variableIndex) { applyPendingVariableSelection(); renderVariableResults(); return; }
+            if (!variableIndexLoading) startVariableIndex();
+        }
+
+        async function startVariableIndex() {
+            var run = ++variableIndexRun;
+            variableIndexLoading = true;
+            setVariableControlsDisabled(true);
+            var results = document.getElementById('qk-variable-results');
+            results.textContent = '正在建立变量索引…可以关闭面板取消。';
+            try {
+                var index = await buildVariableIndexAsync(FLAT, function (phase) {
+                    if (run === variableIndexRun) results.textContent = phase + '…可以关闭面板取消。';
+                }, function () { return run !== variableIndexRun; });
+                if (run !== variableIndexRun) return;
+                var labels = new Map(), idsByLabel = new Map(), scopeCount = 0;
+                for (var id of index.scopes.keys()) {
+                    var label = scopeLabelForId(id);
+                    labels.set(id, label); idsByLabel.set(label, id);
+                    if ((++scopeCount & 255) === 0) {
+                        await new Promise(function (resolve) { setTimeout(resolve, 0); });
+                        if (run !== variableIndexRun) return;
+                    }
+                }
+                variableIndex = index; variableScopeLabels = labels; variableScopeIdsByLabel = idsByLabel;
+                applyPendingVariableSelection();
+                renderVariableResults();
+            } catch (error) {
+                if (run === variableIndexRun) results.textContent = '变量索引建立失败，请关闭后重试。';
+            } finally {
+                if (run === variableIndexRun) { variableIndexLoading = false; setVariableControlsDisabled(false); }
+            }
+        }
+
+        function setVariableControlsDisabled(disabled) {
+            if (disabled) hideVariablePicker();
+            ['qk-variable-scope', 'qk-variable-name', 'qk-variable-mode', 'qk-variable-scope-toggle', 'qk-variable-name-toggle'].forEach(function (id) { document.getElementById(id).disabled = disabled; });
+            if (disabled) {
+                document.getElementById('qk-variable-prev').disabled = true;
+                document.getElementById('qk-variable-next').disabled = true;
+                document.getElementById('qk-variable-count').textContent = '';
+            }
+        }
+
+        function applyPendingVariableSelection() {
+            if (!pendingVariableSelection) return;
+            document.getElementById('qk-variable-name').value = pendingVariableSelection.name;
+            document.getElementById('qk-variable-scope').value = variableScopeLabels.get(pendingVariableSelection.scopeId) || '';
+            document.getElementById('qk-variable-mode').value = pendingVariableSelection.mode || 'all';
+            pendingVariableSelection = null; variablePage = 0;
+        }
+
+        function buildVariablePanel() {
+            // 仅创建空壳，不扫描节点，不预建记录、候选项或结果 DOM。
+            variableEl.innerHTML = '<div class="qk-variable-controls"><strong>变量读写</strong>' +
+                '<label>作用域 <span class="qk-variable-picker"><input id="qk-variable-scope" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="qk-variable-candidates" placeholder="所有作用域；输入筛选调用" autocomplete="off"><button id="qk-variable-scope-toggle" type="button" aria-label="选择作用域">▾</button></span></label>' +
+                '<label>变量 <span class="qk-variable-picker"><input id="qk-variable-name" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="qk-variable-candidates" placeholder="所有变量；输入或选择变量名" autocomplete="off"><button id="qk-variable-name-toggle" type="button" aria-label="选择变量">▾</button></span></label>' +
+                '<label>记录 <select id="qk-variable-mode"><option value="all">全部</option><option value="read">读取 / 引用</option><option value="write">赋值</option></select></label>' +
+                '<button id="qk-variable-prev" disabled>上一页</button><span id="qk-variable-count" role="status"></span><button id="qk-variable-next" disabled>下一页</button>' +
+                '<button id="qk-variable-close" aria-label="关闭变量读写">关闭</button></div>' +
+                '<div class="qk-variable-note">变量按实际存储环境区分，同一子程序的每次调用独立。表达式引用仅表示源码引用，不保证实际读取；旧记录不推测作用域。</div>' +
+                '<div id="qk-variable-results" role="status"></div>';
+            var timer;
+            ['qk-variable-name', 'qk-variable-scope'].forEach(function (id) {
+                document.getElementById(id).addEventListener('input', function () {
+                    clearTimeout(timer);
+                    timer = setTimeout(function () { variablePage = 0; renderVariableResults(); }, 120);
+                });
+                document.getElementById(id).addEventListener('change', function () { clearTimeout(timer); variablePage = 0; renderVariableResults(); });
+            });
+            document.getElementById('qk-variable-mode').addEventListener('change', function () { clearTimeout(timer); variablePage = 0; renderVariableResults(); });
+            document.getElementById('qk-variable-prev').addEventListener('click', function () { variablePage--; renderVariableResults(); });
+            document.getElementById('qk-variable-next').addEventListener('click', function () { variablePage++; renderVariableResults(); });
+            document.getElementById('qk-variable-close').addEventListener('click', function () {
+                setVariablePanelOpen(false); toolbarEl.querySelector('#qk-variable-toggle').focus();
+            });
+            document.getElementById('qk-variable-results').addEventListener('click', function (e) {
+                var button = e.target.closest('button[data-variable-record]');
+                if (!button) return;
+                var record = filteredVariableAccesses[Number(button.getAttribute('data-variable-record'))];
+                selectByFlatIdx(record.flatIdx, true);
+                activeVariableAccess = record;
+                prepareDetailForSearchMatch(variableParameterMatch(FLAT[record.flatIdx].node, record));
+                detailEl.innerHTML = renderDetail(FLAT[record.flatIdx].node);
+                detailEl.scrollTop = 0;
+                highlightVariableAccess();
+                var target = document.getElementById('qk-variable-selected');
+                if (target) target.focus({ preventScroll: true });
+            });
+        }
+
+        var selectScopeCandidates = createVariableCandidateSelector(true);
+        var selectNameCandidates = createVariableCandidateSelector(false);
+        function renderVariableResults() {
+            if (!variableIndex || variableEl.hidden) return;
+            var name = document.getElementById('qk-variable-name').value;
+            var scopeText = document.getElementById('qk-variable-scope').value;
+            var scopeId = scopeText ? variableScopeIdsByLabel.get(scopeText) : null;
+            var mode = document.getElementById('qk-variable-mode').value;
+            // 候选 DOM 有上限，翻页复用候选；大列表筛选时也可继续选择新条件。
+            variablePickerOptions['qk-variable-scope'] = selectScopeCandidates(variableScopeLabels, scopeText);
+            var names = scopeId ? variableIndex.scopes.get(scopeId) : variableIndex.names;
+            variablePickerOptions['qk-variable-name'] = selectNameCandidates(names, name);
+            if (activeVariablePicker) showVariablePicker(activeVariablePicker);
+            if (!variableQueryCache || variableQueryCache.index !== variableIndex || variableQueryCache.scopeText !== scopeText ||
+                variableQueryCache.name !== name || variableQueryCache.mode !== mode) {
+                var run = ++variableFilterRun;
+                var invalidScope = scopeText && !scopeId;
+                var source = invalidScope ? [] : variableAccessSource(variableIndex, scopeId, name);
+                // 不保留历史查询数组。小结果直接筛选，大列表分批扫描；翻页只复用当前结果。
+                variableQueryCache = null; filteredVariableAccesses = [];
+                if (source.length > 4096 && (mode !== 'all' || scopeId && !name || !scopeId && name)) {
+                    document.getElementById('qk-variable-results').textContent = '正在筛选变量记录…';
+                    document.getElementById('qk-variable-count').textContent = '';
+                    document.getElementById('qk-variable-prev').disabled = true;
+                    document.getElementById('qk-variable-next').disabled = true;
+                    lookupVariableAccessesAsync(variableIndex, scopeId, name, mode, function () {
+                        return run !== variableFilterRun || variableEl.hidden;
+                    }).then(function (records) {
+                        if (run !== variableFilterRun || variableEl.hidden) return;
+                        variableQueryCache = { index: variableIndex, scopeText: scopeText, name: name, mode: mode, records: records };
+                        renderVariableResults();
+                    }).catch(function () {
+                        if (run === variableFilterRun && !variableEl.hidden)
+                            document.getElementById('qk-variable-results').textContent = '变量筛选失败，请调整筛选后重试。';
+                    });
+                    return;
+                }
+                variableQueryCache = { index: variableIndex, scopeText: scopeText, name: name, mode: mode,
+                    records: invalidScope ? [] : lookupVariableAccesses(variableIndex, scopeId, name, mode) };
+            }
+            filteredVariableAccesses = variableQueryCache.records;
+            var total = filteredVariableAccesses.length;
+            variablePage = Math.max(0, Math.min(variablePage, Math.ceil(total / variablePageSize) - 1));
+            var start = variablePage * variablePageSize, end = Math.min(total, start + variablePageSize);
+            document.getElementById('qk-variable-count').textContent = total ? (start + 1) + '–' + end + ' / ' + total + ' 条' : '0 条';
+            document.getElementById('qk-variable-prev').disabled = start === 0;
+            document.getElementById('qk-variable-next').disabled = end >= total;
+            var h = '';
+            for (var i = start; i < end; i++) {
+                var record = filteredVariableAccesses[i], item = record.item;
+                var resolved = resolveValue(item.value, VALUES);
+                var text = item.sensitive || resolved.kind === 'masked' ? '******' : item.value && item.value.preview;
+                h += '<button class="qk-variable-row" data-variable-record="' + i + '">' +
+                    '<span>' + esc(variableAccessLabel(record.kind)) + '</span><strong>' + esc(record.name) + '</strong>' +
+                    '<span>' + esc(variableScopeLabels.get(record.scopeId) + ' · ' + searchMatchPath(record.flatIdx) +
+                        (item.iteration == null ? '' : ' · 第 ' + (item.iteration + 1) + ' 次循环')) + '</span>' +
+                    '<span>' + esc(item.paramName || item.paramKey || '—') + '</span>' +
+                    '<code>' + esc(variableListPreview(record.kind === 'reference' ? item.expression : text)) + '</code></button>';
+            }
+            document.getElementById('qk-variable-results').innerHTML = h || '<div class="qk-variable-empty">' +
+                (variableIndex.all.length ? '没有匹配记录，请选择完整的作用域、变量名或调整筛选。' : '此报告没有可识别的变量读写记录。') + '</div>';
+        }
+
+        function hideVariablePicker() {
+            if (activeVariablePicker) {
+                var input = document.getElementById(activeVariablePicker);
+                input.setAttribute('aria-expanded', 'false');
+                input.removeAttribute('aria-activedescendant');
+            }
+            activeVariablePicker = null; activeVariableOption = -1;
+            variableCandidatesEl.hidden = true;
+        }
+
+        function showVariablePicker(id) {
+            var input = document.getElementById(id);
+            if (input.disabled || variableEl.hidden || !variableIndex) return;
+            if (activeVariablePicker !== id) hideVariablePicker();
+            activeVariablePicker = id; activeVariableOption = -1;
+            input.removeAttribute('aria-activedescendant');
+            variableCandidatesEl.scrollTop = 0;
+            var options = variablePickerOptions[id] || [];
+            var allLabel = id === 'qk-variable-name' ? '所有变量' : '所有作用域';
+            var h = '<div id="qk-variable-option-0" role="option" data-candidate-value="" aria-selected="false">' + allLabel + '</div>';
+            for (var i = 0; i < options.length; i++) h += '<div id="qk-variable-option-' + (i + 1) +
+                '" role="option" aria-selected="false" data-candidate-value="' + esc(options[i]) + '" title="' + esc(options[i]) + '">' + esc(options[i]) + '</div>';
+            variableCandidatesEl.innerHTML = h;
+            variableCandidatesEl.setAttribute('aria-label', id === 'qk-variable-name' ? '变量候选' : '作用域候选');
+            input.setAttribute('aria-expanded', 'true');
+            variableCandidatesEl.hidden = false;
+            var rect = input.parentElement.getBoundingClientRect(), viewport = window.innerHeight;
+            var below = viewport - rect.bottom - 8, above = rect.top - 8;
+            var up = below < 160 && above > below;
+            variableCandidatesEl.style.maxHeight = Math.max(24, Math.min(260, up ? above : below)) + 'px';
+            var width = Math.min(Math.max(200, rect.width), Math.max(40, window.innerWidth - 8));
+            variableCandidatesEl.style.width = width + 'px';
+            variableCandidatesEl.style.left = Math.max(4, Math.min(rect.left, window.innerWidth - width - 4)) + 'px';
+            var height = variableCandidatesEl.getBoundingClientRect().height;
+            variableCandidatesEl.style.top = (up ? Math.max(4, rect.top - height - 2) : rect.bottom + 2) + 'px';
+        }
+
+        function chooseVariableCandidate(option) {
+            if (!activeVariablePicker || !option) return;
+            var input = document.getElementById(activeVariablePicker);
+            input.value = option.getAttribute('data-candidate-value');
+            hideVariablePicker();
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.focus();
+            // focus 事件可能重新打开候选，选择完成后应收起。
+            hideVariablePicker();
+        }
+
+        function wireVariablePickers() {
+            ['qk-variable-scope', 'qk-variable-name'].forEach(function (id) {
+                var input = document.getElementById(id), toggle = document.getElementById(id + '-toggle');
+                input.addEventListener('focus', function () { if (!suppressVariablePickerFocus) showVariablePicker(id); });
+                input.addEventListener('blur', hideVariablePicker);
+                toggle.addEventListener('click', function () {
+                    var wasOpen = activeVariablePicker === id;
+                    input.focus();
+                    if (wasOpen) hideVariablePicker(); else showVariablePicker(id);
+                });
+                // 不让箭头抢走输入框焦点，便于键盘继续输入。
+                toggle.addEventListener('mousedown', function (e) { e.preventDefault(); });
+                input.addEventListener('keydown', function (e) {
+                    if (e.key === 'Escape') { hideVariablePicker(); e.preventDefault(); return; }
+                    if (e.key === 'Enter' && activeVariablePicker === id && activeVariableOption >= 0) {
+                        chooseVariableCandidate(variableCandidatesEl.children[activeVariableOption]); e.preventDefault(); return;
+                    }
+                    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+                    if (activeVariablePicker !== id) showVariablePicker(id);
+                    if (activeVariablePicker !== id) return;
+                    var options = variableCandidatesEl.children;
+                    activeVariableOption = Math.max(0, Math.min(options.length - 1,
+                        activeVariableOption < 0 ? (e.key === 'ArrowDown' ? 0 : options.length - 1) : activeVariableOption + (e.key === 'ArrowDown' ? 1 : -1)));
+                    for (var i = 0; i < options.length; i++) options[i].setAttribute('aria-selected', String(i === activeVariableOption));
+                    var active = options[activeVariableOption];
+                    input.setAttribute('aria-activedescendant', active.id);
+                    if (active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+                    e.preventDefault();
+                });
+            });
+            variableCandidatesEl.addEventListener('mousedown', function (e) {
+                if (e.button !== 0) return;
+                var option = e.target.closest('[data-candidate-value]');
+                if (!option) return;
+                e.preventDefault(); chooseVariableCandidate(option);
+            });
+            document.addEventListener('mousedown', function (e) {
+                if (!variableCandidatesEl.contains(e.target) && !e.target.closest('.qk-variable-picker')) hideVariablePicker();
+            });
+            window.addEventListener('scroll', function (e) { if (!variableCandidatesEl.contains(e.target)) hideVariablePicker(); }, true);
+        }
+
+        function fitVariablePanel() {
+            if (variableEl.hidden) return;
+            var available = Math.max(0, window.innerHeight - variableEl.getBoundingClientRect().top - 6);
+            var height = variablePanelHeight(variablePanelPreferredHeight, available);
+            variableEl.style.height = height + 'px';
+            variableSplitterEl.setAttribute('aria-valuemin', String(Math.round(variablePanelHeight(0, available))));
+            variableSplitterEl.setAttribute('aria-valuemax', String(Math.round(variablePanelHeight(Infinity, available))));
+            variableSplitterEl.setAttribute('aria-valuenow', String(Math.round(height)));
+            requestRender();
+        }
+
+        function wireVariablePanelSplitter() {
+            var drag = null;
+            stopVariablePanelDrag = function () {
+                if (!drag) return;
+                document.body.style.userSelect = drag.userSelect;
+                variableSplitterEl.classList.remove('qk-dragging');
+                var pointerId = drag.pointerId; drag = null;
+                if (pointerId != null && variableSplitterEl.hasPointerCapture && variableSplitterEl.hasPointerCapture(pointerId)) variableSplitterEl.releasePointerCapture(pointerId);
+            };
+            variableSplitterEl.addEventListener('pointerdown', function (e) {
+                if (drag || e.button !== 0) return;
+                hideVariablePicker();
+                drag = { y: e.clientY, height: parseFloat(variableEl.style.height) || 280, pointerId: e.pointerId, userSelect: document.body.style.userSelect };
+                variableSplitterEl.classList.add('qk-dragging');
+                document.body.style.userSelect = 'none';
+                if (e.pointerId != null && variableSplitterEl.setPointerCapture) variableSplitterEl.setPointerCapture(e.pointerId);
+                e.preventDefault();
+            });
+            window.addEventListener('pointermove', function (e) {
+                if (!drag || (drag.pointerId != null && e.pointerId !== drag.pointerId)) return;
+                variablePanelPreferredHeight = drag.height + e.clientY - drag.y;
+                fitVariablePanel();
+                // 拖动超出边界时只保留实际高度，不积累屏幕外的距离。
+                variablePanelPreferredHeight = parseFloat(variableEl.style.height);
+            });
+            function endPointerDrag(e) { if (drag && (drag.pointerId == null || e.pointerId === drag.pointerId)) stopVariablePanelDrag(); }
+            window.addEventListener('pointerup', endPointerDrag);
+            window.addEventListener('pointercancel', endPointerDrag);
+            window.addEventListener('blur', stopVariablePanelDrag);
+            variableSplitterEl.addEventListener('lostpointercapture', stopVariablePanelDrag);
+            variableSplitterEl.addEventListener('keydown', function (e) {
+                var now = parseFloat(variableEl.style.height) || 280;
+                if (e.key === 'ArrowUp') variablePanelPreferredHeight = now - 20;
+                else if (e.key === 'ArrowDown') variablePanelPreferredHeight = now + 20;
+                else if (e.key === 'Home') variablePanelPreferredHeight = 0;
+                else if (e.key === 'End') variablePanelPreferredHeight = Infinity;
+                else return;
+                fitVariablePanel(); variablePanelPreferredHeight = parseFloat(variableEl.style.height); e.preventDefault();
+            });
+        }
+
+        function variableDetailSection() {
+            var record = activeVariableAccess;
+            if (!record || record.flatIdx !== selectedFlatIdx) return '';
+            if (variableParameterMatch(FLAT[selectedFlatIdx].node, record)) return '';
+            var item = record.item;
+            return '<section id="qk-variable-selected" class="qk-section qk-search-current" tabindex="-1"><h3 data-match-key="variable-output:' + record.itemIndex + ':target">' +
+                esc(variableAccessLabel(record.kind) + ' · ' + record.name + (item.iteration == null ? '' : ' · 第 ' + (item.iteration + 1) + ' 次循环')) +
+                '</h3><div>' + esc(scopeLabelForId(record.scopeId)) + '</div><div>' + esc(item.paramName || '') + '</div>' +
+                (item.expression && !item.sensitive ? codeBlock(item.expression, '') : '') +
+                valuePane(item.value, !!item.sensitive, null, 'variable-output:' + record.itemIndex + ':value') + '</section>';
+        }
+
+        function indexOfAttention() {
+            for (var i = 0; i < FLAT.length; i++) if (isAttentionNode(FLAT[i].node)) return i;
+            return -1;
+        }
+
+        // ---- 工具条 ----
+        function buildToolbar() {
+            toolbarEl.innerHTML =
+                '<button id="qk-collapse-all">折叠全部</button>' +
+                '<button id="qk-expand-all">展开全部</button>' +
+                '<button id="qk-variable-toggle" aria-expanded="false" aria-controls="qk-variables">变量读写</button>' +
+                '<span class="qk-sep"></span>' +
+                '<input id="qk-search" type="search" aria-label="搜索调试报告" placeholder="搜索报告（Ctrl+F）">' +
+                '<span id="qk-search-nav">' +
+                '  <button id="qk-search-prev" title="上一个匹配（Shift+Enter）" disabled>↑</button>' +
+                '  <button id="qk-search-next" title="下一个匹配（Enter）" disabled>↓</button>' +
+                '  <span id="qk-search-pos">0 / 0</span>' +
+                '  <span id="qk-search-context"></span>' +
+                '</span>' +
+                '<select id="qk-status-filter">' +
+                '  <option value="all">全部状态</option>' +
+                '  <option value="attention">仅需关注</option>' +
+                '  <option value="failed">仅失败</option>' +
+                '  <option value="incomplete">仅未完成</option>' +
+                '  <option value="canceled">仅已取消</option>' +
+                '  <option value="skipped">仅跳过</option>' +
+                '  <option value="message">有警告/错误消息</option>' +
+                '</select>' +
+                '<button id="qk-btn-nextissue">下一个问题 ↓</button>' +
+                '<span class="qk-sep"></span>' +
+                // 主题切换（暗色模式，默认跟随系统）：三态下拉，风格与状态过滤一致。
+                '<select id="qk-theme" title="界面主题（跟随系统 / 浅色 / 深色）">' +
+                '  <option value="system">主题：跟随系统</option>' +
+                '  <option value="light">主题：浅色</option>' +
+                '  <option value="dark">主题：深色</option>' +
+                '</select>' +
+                // F1：报告文件行三动作——定位 / 复制文件 / 上传并复制网址（与旧 HtmlActionLogger 报告文件行对齐）。
+                // 协议链接的 reportPath 拼接与现有 selectinexplorer 一致（不额外编码，避免只改一半）。
+                (META.reportPath
+                    ? '<button id="qk-btn-locate" title="在资源管理器中找到文件">定位报告文件</button>' +
+                      '<button id="qk-btn-copyfile" title="将文件复制到剪贴板">复制文件</button>' +
+                      '<button id="qk-btn-uploadfile" title="上传到网络，并将网址复制到剪贴板。用于将调试文件快速分享给其他人。上传的文件将可以被任何人访问，请避免上传可能包含隐私信息的文件。">上传并复制网址</button>'
+                    : '') +
+                (META.relatedInvocationsUrl
+                    ? '<button id="qk-btn-invocations" title="查看操作窗、文本窗口等后续触发的独立子程序报告">后续交互调用</button>'
+                    : '') +
+                '<span id="qk-count"></span>';
+
+            toolbarEl.querySelector('#qk-collapse-all').addEventListener('click', function () {
+                collapsed = new Set();
+                for (var i = 0; i < FLAT.length; i++) if (FLAT[i].collapsible) collapsed.add(FLAT[i].node.id);
+                rebuildVisible(); selectNearestVisibleAncestor();
+            });
+            toolbarEl.querySelector('#qk-expand-all').addEventListener('click', function () {
+                collapsed = new Set(); rebuildVisible();
+            });
+            toolbarEl.querySelector('#qk-variable-toggle').addEventListener('click', function () {
+                setVariablePanelOpen(variableEl.hidden);
+            });
+            var search = toolbarEl.querySelector('#qk-search');
+            document.addEventListener('keydown', function (e) {
+                if ((e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 'f') {
+                    e.preventDefault(); search.focus(); search.select();
+                }
+            });
+            var timer = null;
+            search.addEventListener('input', function () {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(function () {
+                    query = search.value.trim();
+                    qEscLower = esc(query).toLowerCase();
+                    rebuildSearchMatches(true);
+                }, 120);
+            });
+            search.addEventListener('keydown', function (e) {
+                if (e.key !== 'Enter') return;
+                if (timer) { clearTimeout(timer); timer = null; }
+                var pendingQuery = search.value.trim();
+                if (pendingQuery !== query) {
+                    query = pendingQuery;
+                    qEscLower = esc(query).toLowerCase();
+                    rebuildSearchMatches(true);
+                    e.preventDefault();
+                    return;
+                }
+                if (!query) return;
+                jumpSearchMatch(e.shiftKey ? -1 : 1);
+                e.preventDefault();
+            });
+            toolbarEl.querySelector('#qk-search-prev').addEventListener('click', function () { jumpSearchMatch(-1); });
+            toolbarEl.querySelector('#qk-search-next').addEventListener('click', function () { jumpSearchMatch(1); });
+            toolbarEl.querySelector('#qk-status-filter').addEventListener('change', function () {
+                statusMode = this.value;
+                rebuildSearchMatches(true);
+            });
+            toolbarEl.querySelector('#qk-btn-nextissue').addEventListener('click', jumpNextAttention);
+            // 主题下拉：反映当前选择；切换时应用并持久化。
+            var themeSel = toolbarEl.querySelector('#qk-theme');
+            if (themeSel) {
+                themeSel.value = themeMode;
+                themeSel.addEventListener('change', function () {
+                    themeMode = this.value;
+                    applyTheme(themeMode);
+                    saveTheme(themeMode);
+                });
+            }
+            var locate = toolbarEl.querySelector('#qk-btn-locate');
+            if (locate) locate.addEventListener('click', function () {
+                nav('quicker:selectinexplorer:' + META.reportPath);
+            });
+            // F1：复制文件 / 上传并复制网址（reportPath 拼接与 selectinexplorer 保持一致，不编码）。
+            var copyfile = toolbarEl.querySelector('#qk-btn-copyfile');
+            if (copyfile) copyfile.addEventListener('click', function () {
+                nav('quicker:copyfile:' + META.reportPath);
+            });
+            var uploadfile = toolbarEl.querySelector('#qk-btn-uploadfile');
+            if (uploadfile) uploadfile.addEventListener('click', function () {
+                nav('quicker:uploaddebugfile:' + META.reportPath);
+            });
+            var invocations = toolbarEl.querySelector('#qk-btn-invocations');
+            if (invocations) invocations.addEventListener('click', function () {
+                nav(META.relatedInvocationsUrl);
+            });
+        }
+
+        // ---- 会话级运行环境与动作身份 ----
+        function buildReportInfo() {
+            var items = [];
+            if (META.quickerVersion || META.operatingSystem) {
+                items.push('Quicker-' + esc(META.quickerVersion || '?') + '@Win-' + esc(META.operatingSystem || '?'));
+            }
+            if (META.actionId) {
+                items.push('动作ID:<span class="qk-mono">' + esc(META.actionId) + '</span>');
+            }
+            if (META.sourceActionId) {
+                var sourceUrl = 'https://getquicker.net/Sharedaction?code=' + encodeURIComponent(META.sourceActionId);
+                var source = '来源动作:<a class="qk-mono" href="' + esc(sourceUrl) +
+                    '" target="_blank" rel="noopener noreferrer">' + esc(META.sourceActionId) + '</a>';
+                if (META.sourceActionRevision !== null && META.sourceActionRevision !== undefined) {
+                    source += '<span class="qk-source-revision qk-mono">v' +
+                        esc(META.sourceActionRevision) + '</span>';
+                }
+                items.push(source);
+            }
+
+            reportInfoEl.innerHTML = items.join('<span class="qk-report-info-sep"></span>');
+            reportInfoEl.hidden = items.length === 0;
+        }
+
+        // ---- 横幅：报告文件行 + 未完成/中断 ----
+        function buildBanners() {
+            var html = '';
+            if (META.reportPath) {
+                html += '<div class="qk-banner qk-banner-info">调试报告：' + esc(META.reportPath) + '</div>';
+            }
+            if (META.relatedInvocationsUrl) {
+                html += '<div class="qk-banner qk-banner-info">此动作创建了可触发子程序的窗口。' +
+                    '<a href="' + esc(META.relatedInvocationsUrl) + '">查看后续交互调用报告</a></div>';
+            }
+            if (META.sessionComplete === false) {
+                var reason = META.manifestTerminal
+                    ? '会话有未完成（无终态）步骤，可能中途中断。'
+                    : '会话未正常结束（manifest 停留 Running / 缺失），可能被强制中断。';
+                html += '<div class="qk-banner qk-banner-warning">⚠ 未完成 / 中断：' + esc(reason) +
+                    '（未完成步骤 ' + (META.incompleteCount || 0) + ' 个）已有事件仍完整可读。</div>';
+            }
+            bannersEl.innerHTML = html;
+        }
+
+        // ---- 搜索：保留执行树，只维护字段级匹配与上/下一条定位 ----
+        function rebuildSearchMatches(selectFirst) {
+            if (!query && autoExpandedForSearch.size) {
+                autoExpandedForSearch.forEach(function (nodeId) { collapsed.add(nodeId); });
+                autoExpandedForSearch.clear();
+            }
+
+            searchMatches = collectSearchMatches(FLAT, query, VALUES, statusMode, searchValueCache);
+            var counts = buildSearchMatchCounts(FLAT, searchMatches);
+            ownMatchCounts = counts.ownCounts;
+            subtreeMatchCounts = counts.subtreeCounts;
+            hits = counts.hitIndices;
+            currentSearchMatch = -1;
+            rebuildVisible();
+
+            if (searchMatches.length) {
+                var first = 0;
+                if (selectFirst && selectedFlatIdx >= 0) {
+                    for (var i = 0; i < searchMatches.length; i++) {
+                        if (searchMatches[i].flatIdx === selectedFlatIdx) { first = i; break; }
+                    }
+                }
+                selectSearchMatch(first);
+            } else {
+                if (selectedFlatIdx >= 0) {
+                    detailEl.innerHTML = renderDetail(FLAT[selectedFlatIdx].node);
+                    detailEl.scrollTop = 0;
+                }
+                updateSearchNavigation();
+                renderWindow();
+            }
+        }
+
+        function jumpSearchMatch(direction) {
+            if (!searchMatches.length) return;
+            var next = currentSearchMatch < 0
+                ? (direction < 0 ? searchMatches.length - 1 : 0)
+                : (currentSearchMatch + direction + searchMatches.length) % searchMatches.length;
+            selectSearchMatch(next);
+        }
+
+        function selectSearchMatch(index) {
+            if (index < 0 || index >= searchMatches.length) return;
+            currentSearchMatch = index;
+            var match = searchMatches[index];
+            selectByFlatIdx(match.flatIdx, true, index);
+        }
+
+        function searchMatchPath(flatIdx) {
+            var labels = [], current = flatIdx;
+            while (current >= 0) {
+                var node = FLAT[current].node;
+                var label = node.kind === 'step'
+                    ? (node.stepId ? '#' + node.stepId + ' ' : '') + (node.title || '(步骤)')
+                    : containerLabelPlain(node);
+                labels.push(label);
+                current = FLAT[current].parent;
+            }
+            labels.reverse();
+            return labels.join(' › ');
+        }
+
+        function searchSnippet(text, qLower, maxLength) {
+            var value = String(text || '').replace(/\s+/g, ' ').trim();
+            if (!value) return '';
+            var lower = value.toLowerCase(), at = lower.indexOf(qLower);
+            var limit = maxLength || 90;
+            if (value.length <= limit) return value;
+            var start = Math.max(0, at - Math.floor(limit / 3));
+            var end = Math.min(value.length, start + limit);
+            if (end - start < limit) start = Math.max(0, end - limit);
+            return (start ? '…' : '') + value.slice(start, end) + (end < value.length ? '…' : '');
+        }
+
+        function updateSearchNavigation() {
+            var prev = document.getElementById('qk-search-prev');
+            var next = document.getElementById('qk-search-next');
+            var pos = document.getElementById('qk-search-pos');
+            var context = document.getElementById('qk-search-context');
+            var enabled = searchMatches.length > 0;
+            if (prev) prev.disabled = !enabled;
+            if (next) next.disabled = !enabled;
+            if (pos) pos.textContent = enabled
+                ? (currentSearchMatch >= 0 ? currentSearchMatch + 1 : '—') + ' / ' + searchMatches.length
+                : '0 / 0';
+            if (context) {
+                var match = enabled && currentSearchMatch >= 0 ? searchMatches[currentSearchMatch] : null;
+                var text = match
+                    ? searchMatchPath(match.flatIdx) + ' · ' + match.label + ' · ' + searchSnippet(match.text, query.toLowerCase(), 90)
+                    : (query ? (enabled ? '已标记 ' + searchMatches.length + ' 条匹配' : '无匹配') : '');
+                context.textContent = text;
+                context.title = text;
+            }
+        }
+
+        // ---- 左树可见集派生 ----
+        function rebuildVisible() {
+            var r = computeVisible(FLAT, collapsed, statusMode, '');
+            visible = r.indices;
+            spacerEl.style.height = (visible.length * ROW_H) + 'px';
+            var c = document.getElementById('qk-count');
+            if (c) {
+                var matchedSteps = hits ? hits.size : 0;
+                c.textContent = '可见 ' + visible.length + ' / 共 ' + FLAT.length + ' 节点' +
+                    (query ? ' · 匹配 ' + searchMatches.length + ' 条 / ' + matchedSteps + ' 个节点' : '');
+            }
+            renderWindow();
+        }
+
+        // ---- 定高虚拟窗口渲染 ----
+        var renderPending = false;
+        function requestRender() {
+            if (renderPending) return;
+            renderPending = true;
+            requestAnimationFrame(function () { renderPending = false; renderWindow(); });
+        }
+
+        function renderWindow() {
+            var total = visible.length;
+            if (total === 0) {
+                rowsEl.innerHTML = '';
+                rowsEl.style.transform = 'translateY(0)';
+                if (!document.getElementById('qk-tree-empty')) {
+                    var em = document.createElement('div');
+                    em.id = 'qk-tree-empty';
+                    em.textContent = '无匹配节点。';
+                    spacerEl.appendChild(em);
+                }
+                return;
+            }
+            var em0 = document.getElementById('qk-tree-empty');
+            if (em0) em0.remove();
+
+            var top = scrollEl.scrollTop;
+            var vh = scrollEl.clientHeight || 600;
+            var start = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
+            var end = Math.min(total, Math.ceil((top + vh) / ROW_H) + OVERSCAN);
+
+            var html = '';
+            for (var pos = start; pos < end; pos++) html += nodeRowHtml(visible[pos]);
+            rowsEl.style.transform = 'translateY(' + (start * ROW_H) + 'px)';
+            rowsEl.innerHTML = html;
+        }
+
+        function nodeRowHtml(flatIdx) {
+            var f = FLAT[flatIdx];
+            var node = f.node;
+            var isHit = hits && hits.has(flatIdx);
+            var sel = flatIdx === selectedFlatIdx;
+            var ownCount = ownMatchCounts[flatIdx] || 0;
+            var subtreeCount = subtreeMatchCounts[flatIdx] || 0;
+            var isCurrentMatchRow = currentSearchMatch >= 0 &&
+                searchMatches[currentSearchMatch] && searchMatches[currentSearchMatch].flatIdx === flatIdx;
+
+            var cls = 'qk-node';
+            if (sel) cls += ' qk-selected';
+            if (ownCount) cls += ' qk-search-hit';
+            else if (subtreeCount) cls += ' qk-search-ancestor';
+            if (isCurrentMatchRow) cls += ' qk-search-current-row';
+            if (node.status === 'failed') cls += ' qk-status-failed';
+            else if (node.status === 'incomplete') cls += ' qk-status-incomplete';
+            if (node.disabled) cls += ' qk-disabled';
+            if (isContainerKind(node.kind)) cls += ' qk-container';
+
+            var isCollapsed = !isTreeFiltering() && collapsed.has(node.id);
+            var caret = f.collapsible
+                ? '<span class="qk-caret" data-caret="1">' + (isCollapsed ? '▶' : '▼') + '</span>'
+                : '<span class="qk-caret qk-caret-empty">·</span>';
+
+            var sm = statusMeta(node.status);
+            var icon = sm
+                ? '<span class="qk-icon ' + sm.cls + '">' + sm.icon + '</span>'
+                : '<span class="qk-icon qk-icon-container">' + containerIcon(node.kind) + '</span>';
+
+            var sid = (node.kind === 'step' && node.stepId)
+                ? '<span class="qk-node-sid">#' + esc(node.stepId) + '</span>' : '';
+
+            var labelPlain = nodeLabelText(node);
+            var labelText = esc(labelPlain);
+            var summaryPlain = node.kind === 'step' ? (node.summary || '') : '';
+            var summaryText = esc(summaryPlain);
+            if (isHit) {
+                labelText = markHits(labelText, qEscLower);
+                summaryText = markHits(summaryText, qEscLower);
+            }
+            var fullLabel = summaryPlain ? labelPlain + '  ' + summaryPlain : labelPlain;
+            var summary = summaryPlain
+                ? '<span class="qk-node-summary">' + summaryText + '</span>' : '';
+            var label = '<span class="qk-node-label" title="' + esc(fullLabel) + '">' +
+                '<span class="qk-node-title">' + labelText + '</span>' + summary + '</span>';
+            var badgeCount = ownCount || (isCollapsed ? subtreeCount : 0);
+            var matchBadge = badgeCount
+                ? '<span class="qk-match-count" title="' + badgeCount + ' 个搜索匹配">' + badgeCount + '</span>'
+                : '';
+
+            // 注释和跳过的步骤不在执行树中显示时间，详情仍保留原始时序。
+            var showTiming = node.runnerKey !== 'sys:comment' && !node.disabled && node.status !== 'skipped';
+            // 本步骤自身耗时。
+            var dur = (showTiming && node.durationMs !== null && node.durationMs !== undefined)
+                ? '<span class="qk-node-dur" title="本步骤耗时">+' + esc(fmtDur(node.durationMs)) + '</span>' : '';
+            // 起始偏移：从动作开始到本步骤开始执行的时间（node.elapsedMs），供从总体上感知"多久跑到哪一步"。
+            var start = (showTiming && node.elapsedMs !== null && node.elapsedMs !== undefined)
+                ? '<span class="qk-node-start" title="距动作开始（墙钟 ' + esc(fmtTimeTitle(META.startedUtc, node.elapsedMs)) + '）">' + esc(Math.round(node.elapsedMs)) + 'ms</span>' : '';
+
+            var pad = f.depth * INDENT;
+            var expandedAttr = f.collapsible ? ' aria-expanded="' + (!isCollapsed) + '"' : '';
+            return '<div class="' + cls + '" data-i="' + flatIdx + '" role="treeitem" aria-level="' + (f.depth + 1) +
+                '" aria-selected="' + sel + '"' + expandedAttr + ' style="padding-left:' + pad + 'px">' +
+                caret + icon + sid + label + matchBadge + dur + start + '</div>';
+        }
+
+        // ---- 左树交互：折叠 / 选中 ----
+        function onTreeClick(e) {
+            var rowEl = closest(e.target, 'qk-node', rowsEl);
+            if (!rowEl) return;
+            scrollEl.focus();
+            var flatIdx = parseInt(rowEl.getAttribute('data-i'), 10);
+            var caretEl = closest(e.target, 'qk-caret', rowsEl);
+            if (caretEl && caretEl.getAttribute('data-caret') === '1') {
+                selectByFlatIdx(flatIdx, false);
+                if (isTreeFiltering()) return;
+                var node = FLAT[flatIdx].node;
+                if (collapsed.has(node.id)) expandByFlatIdx(flatIdx); else collapseByFlatIdx(flatIdx);
+                return;
+            }
+            selectByFlatIdx(flatIdx, false);
+        }
+
+        function onTreeKeyDown(e) {
+            if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+            var target = -1;
+            var handled = false;
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                target = findVisibleNeighbor(visible, selectedFlatIdx, e.key === 'ArrowUp' ? -1 : 1);
+                if (target >= 0) {
+                    selectByFlatIdx(target, false);
+                    handled = true;
+                }
+            } else if (e.key === 'ArrowLeft' && selectedFlatIdx >= 0) {
+                var leftItem = FLAT[selectedFlatIdx];
+                if (!isTreeFiltering() && leftItem.collapsible && !collapsed.has(leftItem.node.id)) {
+                    handled = collapseByFlatIdx(selectedFlatIdx);
+                } else if (leftItem.parent >= 0) {
+                    selectByFlatIdx(leftItem.parent, false);
+                    handled = true;
+                }
+            } else if (e.key === 'ArrowRight' && selectedFlatIdx >= 0) {
+                var rightItem = FLAT[selectedFlatIdx];
+                if (!isTreeFiltering() && rightItem.collapsible && collapsed.has(rightItem.node.id)) {
+                    handled = expandByFlatIdx(selectedFlatIdx);
+                } else {
+                    target = firstVisibleChild(selectedFlatIdx);
+                    if (target >= 0) {
+                        selectByFlatIdx(target, false);
+                        handled = true;
+                    }
+                }
+            }
+
+            if (handled) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }
+
+        function isTreeFiltering() {
+            return statusMode !== 'all';
+        }
+
+        function firstVisibleChild(flatIdx) {
+            var pos = visible.indexOf(flatIdx);
+            if (pos < 0) return -1;
+            for (var i = pos + 1; i < visible.length; i++) {
+                var candidate = visible[i];
+                if (FLAT[candidate].depth <= FLAT[flatIdx].depth) break;
+                if (FLAT[candidate].parent === flatIdx) return candidate;
+            }
+            return -1;
+        }
+
+        function collapseByFlatIdx(flatIdx) {
+            var item = FLAT[flatIdx];
+            if (!item || !item.collapsible || collapsed.has(item.node.id)) return false;
+
+            collapsed.add(item.node.id);
+            autoExpandedForSearch.delete(item.node.id);
+            var selection = selectionAfterCollapse(FLAT, selectedFlatIdx, flatIdx);
+            rebuildVisible();
+            if (selection !== selectedFlatIdx) selectByFlatIdx(selection, false);
+            else if (selectedFlatIdx >= 0) scrollIntoView(selectedFlatIdx);
+            return true;
+        }
+
+        function expandByFlatIdx(flatIdx) {
+            var item = FLAT[flatIdx];
+            if (!item || !item.collapsible || !collapsed.has(item.node.id)) return false;
+            collapsed.delete(item.node.id);
+            rebuildVisible();
+            if (selectedFlatIdx >= 0) scrollIntoView(selectedFlatIdx);
+            return true;
+        }
+
+        function selectByFlatIdx(flatIdx, reveal, preferredMatchIndex) {
+            if (flatIdx !== selectedFlatIdx) { extraVariableLimit = 8; extraVariableHistories.clear(); }
+            activeVariableAccess = null;
+            selectedFlatIdx = flatIdx;
+            if (flatIdx < 0) {
+                currentSearchMatch = -1;
+                detailEl.innerHTML = renderDetail(null);
+                updateSearchNavigation();
+                renderWindow();
+                return;
+            }
+            if (reveal) revealAncestors(flatIdx, query && preferredMatchIndex !== undefined);
+            // 摘要、问题导航、循环定位等直接定位若命中了当前筛选之外的节点，自动清除筛选，
+            // 确保用户点击后一定能在左树看到目标，而不是只更新右侧详情。
+            if (reveal && visible.indexOf(flatIdx) < 0 && statusMode !== 'all') {
+                statusMode = 'all';
+                var statusSelect = toolbarEl.querySelector('#qk-status-filter');
+                if (statusSelect) statusSelect.value = 'all';
+                searchMatches = collectSearchMatches(FLAT, query, VALUES, statusMode, searchValueCache);
+                var counts = buildSearchMatchCounts(FLAT, searchMatches);
+                ownMatchCounts = counts.ownCounts;
+                subtreeMatchCounts = counts.subtreeCounts;
+                hits = counts.hitIndices;
+                rebuildVisible();
+            }
+            // 选中项若被折叠隐藏，重算可见集以纳入其祖先链。
+            if (visible.indexOf(flatIdx) < 0) rebuildVisible();
+
+            if (preferredMatchIndex !== undefined && searchMatches[preferredMatchIndex] &&
+                searchMatches[preferredMatchIndex].flatIdx === flatIdx) {
+                currentSearchMatch = preferredMatchIndex;
+            } else {
+                currentSearchMatch = -1;
+                for (var i = 0; i < searchMatches.length; i++) {
+                    if (searchMatches[i].flatIdx === flatIdx) { currentSearchMatch = i; break; }
+                }
+            }
+            prepareDetailForSearchMatch(currentSearchMatch >= 0 ? searchMatches[currentSearchMatch] : null);
+            detailEl.innerHTML = renderDetail(FLAT[flatIdx].node);
+            detailEl.scrollTop = 0;
+            highlightCurrentSearchMatch();
+            updateSearchNavigation();
+            renderWindow();
+            scrollIntoView(flatIdx);
+        }
+
+        function revealAncestors(flatIdx, trackSearchExpansion) {
+            var p = FLAT[flatIdx].parent;
+            while (p >= 0) {
+                var nodeId = FLAT[p].node.id;
+                if (trackSearchExpansion && collapsed.has(nodeId)) autoExpandedForSearch.add(nodeId);
+                collapsed.delete(nodeId);
+                p = FLAT[p].parent;
+            }
+            rebuildVisible();
+        }
+
+        function selectNearestVisibleAncestor() {
+            if (selectedFlatIdx >= 0 && visible.indexOf(selectedFlatIdx) < 0) {
+                var target = FLAT[selectedFlatIdx].parent;
+                while (target >= 0 && visible.indexOf(target) < 0) target = FLAT[target].parent;
+                selectByFlatIdx(target >= 0 ? target : (visible.length ? visible[0] : -1), false);
+            }
+        }
+
+        // ---- 首屏诊断摘要 / 最慢步骤 ----
+        function buildSummary() {
+            var stats = summarizeFlat(FLAT);
+            var slow = topSlowSteps(FLAT, 10);
+            function chip(filter, label, count, cls) {
+                return '<button class="qk-summary-chip ' + (cls || '') + '" data-summary-filter="' + filter + '"' +
+                    (count ? '' : ' disabled') + '>' + label + ' <strong>' + count + '</strong></button>';
+            }
+            var html = '<div class="qk-summary-main"><span class="qk-summary-title">执行概览</span>' +
+                chip('all', '步骤', stats.steps) +
+                chip('attention', '需关注', stats.attention, stats.attention ? 'qk-summary-attention' : '') +
+                chip('failed', '失败', stats.failed, stats.failed ? 'qk-summary-failed' : '') +
+                chip('incomplete', '未完成', stats.incomplete) +
+                chip('canceled', '已取消', stats.canceled) +
+                chip('message', '警告/错误', stats.warnings + stats.errors) +
+                '<button class="qk-summary-chip" id="qk-show-slowest"' + (slow.length ? '' : ' disabled') +
+                '>最慢步骤</button></div>';
+            if (slow.length) {
+                html += '<div id="qk-slowest-panel" hidden><div class="qk-slowest-title">最慢步骤（点击定位）</div>';
+                for (var i = 0; i < slow.length; i++) {
+                    var item = slow[i], node = item.node;
+                    html += '<button class="qk-slowest-row" data-select-flat="' + item.flatIdx + '">' +
+                        '<span>' + (node.stepId ? '#' + esc(node.stepId) + ' ' : '') + esc(node.title || '(步骤)') + '</span>' +
+                        '<strong>' + esc(fmtDur(node.durationMs)) + '</strong></button>';
+                }
+                html += '</div>';
+            }
+            summaryEl.innerHTML = html;
+        }
+
+        function onSummaryClick(e) {
+            var target = e.target;
+            if (!target || !target.getAttribute) return;
+            var row = closest(target, 'qk-slowest-row', summaryEl);
+            if (row) {
+                var flatIdx = parseInt(row.getAttribute('data-select-flat'), 10);
+                var panel = document.getElementById('qk-slowest-panel');
+                if (panel) panel.hidden = true;
+                selectByFlatIdx(flatIdx, true);
+                return;
+            }
+            var chip = closest(target, 'qk-summary-chip', summaryEl);
+            if (!chip || chip.disabled) return;
+            if (chip.id === 'qk-show-slowest') {
+                var slowPanel = document.getElementById('qk-slowest-panel');
+                if (slowPanel) slowPanel.hidden = !slowPanel.hidden;
+                return;
+            }
+            var filter = chip.getAttribute('data-summary-filter');
+            if (filter) {
+                statusMode = filter;
+                var select = toolbarEl.querySelector('#qk-status-filter');
+                if (select) select.value = filter;
+                rebuildSearchMatches(true);
+            }
+        }
+
+        function scrollIntoView(flatIdx) {
+            var pos = visible.indexOf(flatIdx);
+            if (pos < 0) return;
+            var y = pos * ROW_H;
+            var vh = scrollEl.clientHeight || 600;
+            if (y < scrollEl.scrollTop || y + ROW_H > scrollEl.scrollTop + vh) {
+                scrollEl.scrollTop = Math.max(0, y - vh / 2);
+                renderWindow();
+            }
+        }
+
+        function jumpNextAttention() {
+            if (!FLAT.length) return;
+            var next = findNextIndex(FLAT, isAttentionNode, selectedFlatIdx < 0 ? -1 : selectedFlatIdx);
+            if (next < 0) { flashNoAttention(); return; }
+            selectByFlatIdx(next, true);
+        }
+        function flashNoAttention() {
+            var btn = toolbarEl.querySelector('#qk-btn-nextissue');
+            if (!btn) return;
+            var t = btn.textContent; btn.textContent = '没有需关注的问题';
+            setTimeout(function () { btn.textContent = t; }, 900);
+        }
+
+        // ---- 右详情面板 ----
+        function renderDetail(node) {
+            copyTexts = [];
+            if (!node) return '<div class="qk-detail-empty">在左侧执行树选择一个步骤查看详情。</div>';
+
+            var h = breadcrumbBlock(selectedFlatIdx) + titleBlock(node) + metaBlock(node);
+            h += variableDetailSection();
+            var d = node.detail;
+            var attentionMessages = [], otherMessages = [];
+            if (d && d.messages) {
+                for (var messageIndex = 0; messageIndex < d.messages.length; messageIndex++) {
+                    var message = d.messages[messageIndex];
+                    var record = { message: message, index: messageIndex };
+                    if (message.level === 'warning' || message.level === 'error') attentionMessages.push(record);
+                    else otherMessages.push(record);
+                }
+            }
+
+            // 诊断信息优先：失败和警告/错误消息不再藏在完整输入之后。
+            if (d && d.failure) h += failureSection(d.failure);
+            if (attentionMessages.length) h += messagesSection(attentionMessages, '警告与错误');
+            h += variableWriteSummary(node.variableOutputs, VALUES, extraVariableLimit, extraVariableHistories, scopeLabelForId, extraVariableGroups);
+
+            // F2：循环迭代——右详情顶部前置显示完整项值（复用 valuePane：全值 + 复制 + 脱敏，表达式无关）。
+            if (node.kind === 'loopIteration' && node.itemValue) {
+                h += loopItemSection(node);
+            }
+            if (node.kind === 'loopExit') h += loopExitSection(node);
+
+            var loopSummary = summarizeLoopIterations(node);
+            if (loopSummary.count) h += loopSummarySection(loopSummary);
+
+            if (isContainerKind(node.kind) && !node.detail) {
+                h += containerNote(node);
+            }
+            if (d) {
+                if (d.inputs && d.inputs.length) h += inputsSection(d.inputs);
+                if (d.outputs && d.outputs.length) h += outputsSection(node, d.outputs);
+                if (otherMessages.length) h += messagesSection(otherMessages, '消息');
+            }
+            return h;
+        }
+
+        function breadcrumbBlock(flatIdx) {
+            if (flatIdx < 0 || !FLAT[flatIdx]) return '';
+            var path = [], i = flatIdx;
+            while (i >= 0) {
+                path.push(i);
+                i = FLAT[i].parent;
+            }
+            path.reverse();
+            var h = '<nav class="qk-breadcrumb" aria-label="节点路径">';
+            for (var p = 0; p < path.length; p++) {
+                var idx = path[p], node = FLAT[idx].node;
+                var label = node.kind === 'step'
+                    ? (node.stepId ? '#' + node.stepId + ' ' : '') + (node.title || '(步骤)')
+                    : containerLabelPlain(node);
+                if (p) h += '<span class="qk-breadcrumb-sep">›</span>';
+                h += '<button data-select-flat="' + idx + '"' + (idx === flatIdx ? ' disabled' : '') +
+                    ' title="' + esc(label) + '">' + esc(label) + '</button>';
+            }
+            return h + '</nav>';
+        }
+
+        function titleBlock(node) {
+            var name = node.kind === 'step' ? esc(node.title || '(步骤)') : esc(containerLabelPlain(node));
+            var sid = (node.kind === 'step' && node.stepId)
+                ? '<span class="qk-dt-sid" data-match-key="step-id">#' + esc(node.stepId) + '</span>' : '';
+            var sm = statusMeta(node.status);
+            var badge = sm ? '<span class="qk-badge ' + sm.badge + '">' + esc(sm.label) + '</span>' : '';
+            var summary = node.kind === 'step' && node.summary
+                ? '<div class="qk-dsummary" data-match-key="summary">' + esc(node.summary) + '</div>' : '';
+            return '<div class="qk-dtitle"><span class="qk-dt-name" data-match-key="title">' + name + '</span>' + sid + badge + '</div>' +
+                summary;
+        }
+
+        function metaBlock(node) {
+            var parts = [];
+            if (node.runnerKey) parts.push('<span title="runnerKey" data-match-key="runner-key">' + esc(node.runnerKey) + '</span>');
+            if (node.durationMs !== null && node.durationMs !== undefined) parts.push('耗时 ' + esc(fmtDur(node.durationMs)));
+            if (node.elapsedMs !== null && node.elapsedMs !== undefined) {
+                parts.push('<span title="墙钟 ' + esc(fmtTimeTitle(META.startedUtc, node.elapsedMs)) + '">起始 +' +
+                    esc(Math.round(node.elapsedMs)) + 'ms</span>');
+            }
+            if (node.delayMs) parts.push('延迟 ' + esc(node.delayMs) + 'ms');
+            if (node.disabled) parts.push('已禁用');
+            if (node.skipReason) parts.push('跳过：' + (node.skipReason === 'Disabled' ? '已禁用' : esc(node.skipReason)));
+            var meta = parts.join(' · ');
+
+            // 新定位信息放在旧协议原本保留的中间段，第三段继续发送 stepId：
+            // 新客户端用 SnapshotHash + sourcePath 做安全回链；旧客户端忽略中间段，仍按 stepId 定位。
+            var link = '';
+            var isPublicSubProgram = node.sourceProgramKind === 'publicSubProgram' && node.sourceProgramId;
+            var findTarget = isPublicSubProgram
+                ? 'publicSubProgram:' + encodeURIComponent(node.sourceProgramId)
+                : META.actionId;
+            var findSnapshotHash = isPublicSubProgram ? node.sourceSnapshotHash : META.snapshotHash;
+            if (findTarget && (node.sourcePath || node.stepId)) {
+                link = '<a href="#" data-find-source="' + esc(node.sourcePath || '') +
+                    '" data-find-target="' + esc(findTarget) +
+                    '" data-find-hash="' + esc(findSnapshotHash || '') +
+                    '" data-findstep="' + esc(node.stepId || '') +
+                    '" title="在编辑器中定位该步骤">定位步骤 ↗</a>';
+            }
+            if (!meta && !link) return '';
+            return '<div class="qk-dmeta">' + meta + link + '</div>';
+        }
+
+        // F2：循环项值区块——迭代最前面，完整项值经 valuePane 呈现（大值全文可展开、脱敏掩码、可复制）。
+        function loopItemSection(node) {
+            return '<div class="qk-section qk-loopitem"><h3>循环项值</h3>' +
+                '<div class="qk-io"><div class="qk-io-head">' +
+                '<span class="qk-io-name">本次循环处理的项</span>' +
+                '<span class="qk-io-origin">【值】</span></div>' +
+                valuePane(node.itemValue, !!node.itemSensitive, null, 'loop-item') + '</div></div>';
+        }
+
+        function loopExitSection(node) {
+            var completed = node.completedIterations === null || node.completedIterations === undefined
+                ? '—' : node.completedIterations;
+            var planned = node.configuredCount === null || node.configuredCount === undefined || node.configuredCount < 0
+                ? '无限' : node.configuredCount;
+            return '<div class="qk-section qk-loop-exit" data-match-key="loop-exit"><h3>循环提前结束</h3>' +
+                '<div class="qk-loop-exit-summary">中止条件在第 <strong>' + esc(node.iterationNumber) +
+                '</strong> 次循环体开始前满足；已完成 <strong>' + esc(completed) +
+                '</strong> / 计划 <strong>' + esc(planned) + '</strong> 次。</div></div>';
+        }
+
+        function loopSummarySection(summary) {
+            var h = '<div class="qk-section qk-loop-summary"><h3>循环概览</h3><div class="qk-loop-stats">' +
+                '<div><strong>' + summary.count + '</strong><span>迭代次数</span></div>' +
+                '<div class="' + (summary.problemCount ? 'qk-loop-problem' : '') + '"><strong>' +
+                summary.problemCount + '</strong><span>问题迭代</span></div>';
+            if (summary.averageDurationMs !== null) {
+                h += '<div><strong>' + esc(fmtDur(summary.averageDurationMs)) + '</strong><span>平均耗时</span></div>' +
+                    '<div><strong>' + esc(fmtDur(summary.slowest.durationMs)) + '</strong><span>最慢一次</span></div>';
+            }
+            h += '</div><div class="qk-loop-links">';
+            if (summary.firstProblem && flatIndexById[summary.firstProblem.id] !== undefined) {
+                h += '<button data-select-node="' + esc(summary.firstProblem.id) + '">定位首个问题迭代</button>';
+            }
+            if (summary.slowest && flatIndexById[summary.slowest.id] !== undefined) {
+                h += '<button data-select-node="' + esc(summary.slowest.id) + '">定位最慢迭代（第 ' +
+                    esc(summary.slowest.iterationNumber) + ' 次）</button>';
+            }
+            return h + '</div></div>';
+        }
+
+        function containerNote(node) {
+            var rows = [];
+            function row(k, v, matchKey) {
+                rows.push('<div' + (matchKey ? ' data-match-key="' + matchKey + '"' : '') +
+                    '><span class="qk-cn-k">' + esc(k) + '</span>' + esc(v) + '</div>');
+            }
+            switch (node.kind) {
+                case 'actionRoot': row('节点', '动作根'); break;
+                case 'loopIteration': row('循环', '第 ' + node.iterationNumber + ' 次迭代'); break;
+                case 'loopExit':
+                    row('结果', '中止条件满足，提前结束循环');
+                    var completed = node.completedIterations === null || node.completedIterations === undefined
+                        ? '—' : node.completedIterations;
+                    var planned = node.configuredCount === null || node.configuredCount === undefined
+                        ? '—' : (node.configuredCount < 0 ? '无限' : node.configuredCount);
+                    row('已完成', completed + ' / ' + planned);
+                    break;
+                case 'scope': row('作用域', '步骤组 / 分支体'); break;
+                case 'parallelScope':
+                    row('并行区', '等待模式 ' + (node.waitMode || '—'), 'parallel-wait');
+                    row('分支数', node.branchCount);
+                    break;
+                case 'parallelBranch': row('并行分支', 'Lane ' + node.laneId, 'parallel-lane'); break;
+                default: row('节点', node.kind);
+            }
+            return '<div class="qk-section"><h3>容器信息</h3><div class="qk-container-note">' + rows.join('') + '</div></div>';
+        }
+
+        function inputsSection(inputs) {
+            var h = '<div class="qk-section qk-io-section"><h3>输入</h3>';
+            for (var i = 0; i < inputs.length; i++) h += inputBlock(inputs[i], i);
+            return h + '</div>';
+        }
+
+        function inputBlock(inp, i) {
+            var hasExpr = inp.expression !== null && inp.expression !== undefined && inp.expression !== '';
+            var head = '<div class="qk-io-head">' +
+                '<span class="qk-io-name" data-match-key="input:' + i + ':param">' + esc(inp.paramName || '(输入)') + '</span>' +
+                (inp.origin === 'variable' ? '<button class="qk-variable-link" data-variable-name="' + esc(inp.varName) +
+                    '" data-variable-scope="' + esc(inp.variableScopeId == null ? 'unknown' : inp.variableScopeId) + '"' : '<span class="qk-io-origin"') +
+                ' data-match-key="input:' + i + ':var">' + esc(originLabel(inp.origin, inp.varName)) + (inp.origin === 'variable' ? '</button>' : '</span>');
+
+            var body;
+            if (inp.sensitive) {
+                // 兼容旧报告：sensitive=true 时不展示源码/明文。
+                body = valuePane(inp.value, true, null, 'input:' + i + ':value');
+            } else if (hasExpr) {
+                var exprTab = esc(exprTabLabel(inp.origin));
+                body = '<div class="qk-io-value-cell qk-io-value-cell-switchable">' +
+                    '<span class="qk-seg">' +
+                    '<button data-seg="expr">' + exprTab + '</button>' +
+                    '<button data-seg="val" class="qk-seg-active">值</button></span>' +
+                    '<div class="qk-pane" data-pane="expr" data-match-key="input:' + i + ':expression">' + codeBlock(inp.expression, '') + '</div>' +
+                    '<div class="qk-pane qk-pane-active" data-pane="val">' +
+                    valuePane(inp.value, false, inp.optionName, 'input:' + i + ':value') + '</div></div>';
+            } else {
+                body = valuePane(inp.value, false, inp.optionName, 'input:' + i + ':value');
+            }
+            head += '</div>';
+            return '<div class="qk-io qk-io-compact">' + head + body + '</div>';
+        }
+
+        function outputsSection(node, outputs) {
+            var groups = groupOutputsWithIndices(outputs);
+            var h = '<div class="qk-section qk-io-section"><h3>输出</h3>';
+            for (var i = 0; i < groups.length; i++) {
+                var group = groups[i], latest = group.items[group.items.length - 1];
+                if (group.items.length === 1) {
+                    h += outputBlock(latest.output, latest.index, null);
+                    continue;
+                }
+                var expandedKey = node.id + ':' + i;
+                var expanded = expandedOutputGroups.has(expandedKey);
+                h += '<div class="qk-io qk-io-compact qk-output-group"><div class="qk-io-head">' +
+                    '<button class="qk-io-name qk-variable-link"' + (latest.output.targetKind === 'Variable' ? ' data-variable-name="' + esc(latest.output.targetName) +
+                        '" data-variable-scope="' + esc(latest.output.variableScopeId == null ? 'unknown' : latest.output.variableScopeId) + '"' : ' disabled') +
+                    ' data-match-key="output:' + latest.index + ':target">' + esc(outputLabel(latest.output)) + '</button>' +
+                    '<span class="qk-io-kind" data-match-key="output:' + latest.index + ':kind">' + esc(group.targetKind || '') + '</span>' +
+                    '<span class="qk-output-count">更新 ' + group.items.length + ' 次，当前为最终值</span>' +
+                    '<button class="qk-output-toggle" data-output-group="' + i + '">' +
+                    (expanded ? '收起历史' : '查看全部历史') + '</button></div>' +
+                    valuePane(latest.output.value, !!latest.output.sensitive, null, 'output:' + latest.index + ':value');
+                if (expanded) {
+                    h += '<div class="qk-output-history">';
+                    for (var j = 0; j < group.items.length; j++) {
+                        var item = group.items[j];
+                        h += '<div class="qk-output-history-row"><span>第 ' + (j + 1) + ' 次</span>' +
+                            valuePane(item.output.value, !!item.output.sensitive, null,
+                                'output:' + item.index + ':value') + '</div>';
+                    }
+                    h += '</div>';
+                }
+                h += '</div>';
+            }
+            return h + '</div>';
+        }
+
+        function groupOutputsWithIndices(outputs) {
+            var groups = [], byKey = Object.create(null);
+            for (var i = 0; i < outputs.length; i++) {
+                var output = outputs[i];
+                var key = outputGroupKey(output);
+                var group = byKey[key];
+                if (!group) {
+                    group = { targetName: output.targetName, targetKind: output.targetKind, items: [] };
+                    byKey[key] = group;
+                    groups.push(group);
+                }
+                group.items.push({ output: output, index: i });
+            }
+            return groups;
+        }
+
+        function outputBlock(output, outputIndex, note) {
+            return '<div class="qk-io qk-io-compact"><div class="qk-io-head">' +
+                '<button class="qk-io-name qk-variable-link"' + (output.targetKind === 'Variable' ? ' data-variable-name="' + esc(output.targetName) +
+                    '" data-variable-scope="' + esc(output.variableScopeId == null ? 'unknown' : output.variableScopeId) + '"' : ' disabled') +
+                ' data-match-key="output:' + outputIndex + ':target">' + esc(outputLabel(output)) + '</button>' +
+                '<span class="qk-io-kind" data-match-key="output:' + outputIndex + ':kind">' + esc(output.targetKind || '') + '</span>' +
+                (note ? '<span class="qk-output-count">' + esc(note) + '</span>' : '') + '</div>' +
+                valuePane(output.value, !!output.sensitive, null, 'output:' + outputIndex + ':value') + '</div>';
+        }
+
+        function messagesSection(messages, title) {
+            var h = '<div class="qk-section"><h3>' + esc(title || '消息') + '</h3>';
+            for (var i = 0; i < messages.length; i++) {
+                var record = messages[i];
+                var m = record.message || record;
+                var messageIndex = record.index !== undefined ? record.index : i;
+                var matchAttr = ' data-match-key="message:' + messageIndex + '"';
+                if (m.level === 'raw') {
+                    // 复现 AddRawContent：原始 HTML 片段逐字保真（innerHTML）。
+                    h += '<div class="qk-msg"' + matchAttr + '>' + (m.text || '') + '</div>';
+                } else {
+                    var cls = m.level === 'error' ? 'qk-msg-error' : (m.level === 'warning' ? 'qk-msg-warning' : 'qk-msg-info');
+                    var prefix = m.code ? '[降级 ' + esc(m.code) + '] ' : '';
+                    h += '<div class="qk-msg ' + cls + '"' + matchAttr + '>' + prefix + esc(m.text) + '</div>';
+                }
+            }
+            return h + '</div>';
+        }
+
+        function repeatText(text, count) {
+            var result = '';
+            while (count-- > 0) result += text;
+            return result;
+        }
+
+        function expandTabsForMarker(text, tabSize) {
+            var result = '', column = 0;
+            for (var i = 0; i < text.length; i++) {
+                if (text.charAt(i) === '\t') {
+                    var spaces = tabSize - (column % tabSize);
+                    result += repeatText(' ', spaces);
+                    column += spaces;
+                } else {
+                    result += ' ';
+                    column++;
+                }
+            }
+            return result;
+        }
+
+        function expressionDiagnosticFrame(diagnostic) {
+            if (!diagnostic) return '';
+            var hasFullSource = diagnostic.sourceCode !== null && diagnostic.sourceCode !== undefined;
+            var source = hasFullSource ? String(diagnostic.sourceCode) : String(diagnostic.codeSnippet || '');
+            if (!source) return '';
+
+            // JSON 解析后会还原 CRLF/LF；仅在显示层统一分行，复制仍使用原始 source。
+            var lines = source.replace(/\r\n?/g, '\n').split('\n');
+            var line = hasFullSource ? Number(diagnostic.line || 1) : 1;
+            var column = hasFullSource ? Number(diagnostic.column || 1) : 1;
+            line = Math.max(1, Math.min(lines.length, isFinite(line) ? line : 1));
+            column = Math.max(1, isFinite(column) ? column : 1);
+
+            var start = Math.max(0, line - 1 - 2);
+            var end = Math.min(lines.length, line + 2);
+            var width = String(end).length;
+            var frame = [];
+            if (start > 0) frame.push(repeatText(' ', width) + ' | …');
+            for (var i = start; i < end; i++) {
+                var number = repeatText(' ', width - String(i + 1).length) + String(i + 1);
+                frame.push(number + ' | ' + lines[i]);
+                if (i === line - 1) {
+                    var before = lines[i].slice(0, Math.min(column - 1, lines[i].length));
+                    frame.push(repeatText(' ', width) + ' | ' + expandTabsForMarker(before, 4) + '^');
+                }
+            }
+            if (end < lines.length) frame.push(repeatText(' ', width) + ' | …');
+
+            var stage = diagnostic.stage === 'Parse' ? '语法/解析阶段' : '运行阶段';
+            var location = diagnostic.line && diagnostic.column
+                ? '位置 ' + diagnostic.line + ':' + diagnostic.column
+                : '位置未知';
+            var cid = copyTexts.push(source) - 1;
+            return '<div class="qk-expression-diagnostic">' +
+                '<div class="qk-vmeta">' + esc(diagnostic.engine || '表达式') + ' · ' + esc(stage) + ' · ' +
+                esc(location) + '<button class="qk-copy" data-copy="' + cid + '">复制源码</button></div>' +
+                '<pre class="qk-code-frame" data-match-key="failure:diagnostic-source">' + esc(frame.join('\n')) + '</pre></div>';
+        }
+
+        function failureSection(fail) {
+            var diagnostic = fail.expressionDiagnostic;
+            var message = diagnostic && diagnostic.message ? diagnostic.message : fail.message;
+            var h = '<div class="qk-section"><h3>失败</h3><div class="qk-failure">' +
+                '<div class="qk-fail-msg" data-match-key="failure:message">' + esc(message || '(无消息)') + '</div>';
+            h += expressionDiagnosticFrame(diagnostic);
+            if (fail.stack) {
+                var cid = copyTexts.push(fail.stack) - 1;
+                h += '<div class="qk-vmeta">堆栈<button class="qk-copy" data-copy="' + cid + '">复制</button></div>' +
+                    '<pre class="qk-stack" data-match-key="failure:stack">' + esc(fail.stack) + '</pre>';
+            }
+            return h + '</div></div>';
+        }
+
+        // 完整值面板：等宽、可滚动、可复制；旧报告 sensitive 恒掩码；附件给相对链接；截断标注。
+        function valuePane(cell, sensitive, optionName, matchKey) {
+            var r = resolveValue(cell, VALUES);
+            if (sensitive) r = { kind: 'masked', typeName: r.typeName };
+
+            if (r.kind === 'null') return wrapSearchTarget('<pre class="qk-value qk-value-null">*NULL*</pre>', matchKey);
+            if (r.kind === 'masked') return wrapSearchTarget('<pre class="qk-value qk-value-masked">******</pre>', matchKey);
+            if (r.kind === 'attachment') {
+                var href = 'attachments/' + r.attachmentRef;
+                return wrapSearchTarget('<div class="qk-vmeta">' + esc(r.typeName || '') + '</div>' +
+                    '<div class="qk-attach"><a href="' + esc(href) + '">查看附件（' + esc(r.attachmentRef) + '）</a></div>', matchKey);
+            }
+            var text = r.kind === 'full' ? r.content : r.text;
+            var metaHtml = '';
+            if (r.kind === 'full') {
+                metaHtml = esc(r.typeName || '') + (r.truncated ? ' <span class="qk-vtrunc">（值已因预算截断）</span>' : '');
+            } else if (r.note) {
+                metaHtml = esc(r.note);
+            }
+            return wrapSearchTarget(valueBox(metaHtml, text, optionName), matchKey);
+        }
+
+        function wrapSearchTarget(html, matchKey) {
+            return matchKey
+                ? '<div class="qk-search-target" data-match-key="' + esc(matchKey) + '">' + html + '</div>'
+                : html;
+        }
+
+        // 源码/文本块（表达式面板、堆栈等）：可复制。
+        function codeBlock(text, metaLabel) {
+            return valueBox(metaLabel ? esc(metaLabel) : '', text);
+        }
+
+        // 值/代码块通用外壳：复制按钮绝对定位到右上角、悬停显现（不再独占一行）。
+        function valueBox(metaHtml, text, optionName) {
+            var cid = copyTexts.push(text == null ? '' : text) - 1;
+            var showOptionName = optionName &&
+                String(optionName).toLowerCase() !== String(text).toLowerCase();
+            var valueHtml = showOptionName
+                ? '<div class="qk-value qk-option-value"><span class="qk-option-title">' +
+                    esc(optionName) + '</span><code class="qk-option-raw">' + esc(text) + '</code></div>'
+                : '<pre class="qk-value">' + esc(text) + '</pre>';
+            return '<div class="qk-valwrap">' +
+                (metaHtml ? '<div class="qk-vmeta">' + metaHtml + '</div>' : '') +
+                '<button class="qk-copy" data-copy="' + cid + '" title="复制完整内容">复制</button>' +
+                valueHtml + '</div>';
+        }
+
+        function prepareDetailForSearchMatch(match) {
+            if (match && match.variableOutputIndex !== undefined && selectedFlatIdx >= 0) {
+                var item = FLAT[selectedFlatIdx].node.variableOutputs[match.variableOutputIndex];
+                activeVariableAccess = { flatIdx: selectedFlatIdx, item: item, itemIndex: match.variableOutputIndex,
+                    name: item.targetName, kind: 'write', scopeId: item.variableScopeId == null ? 'unknown' : String(item.variableScopeId) };
+                return;
+            }
+            if (!match || match.outputIndex === undefined || selectedFlatIdx < 0) return;
+            var node = FLAT[selectedFlatIdx].node;
+            var outputs = node.detail && node.detail.outputs;
+            if (!outputs) return;
+            var groups = groupOutputsWithIndices(outputs);
+            for (var i = 0; i < groups.length; i++) {
+                for (var j = 0; j < groups[i].items.length; j++) {
+                    if (groups[i].items[j].index === match.outputIndex && groups[i].items.length > 1) {
+                        expandedOutputGroups.add(node.id + ':' + i);
+                        return;
+                    }
+                }
+            }
+        }
+
+        function highlightCurrentSearchMatch() {
+            if (!query || currentSearchMatch < 0 || !searchMatches[currentSearchMatch]) return;
+            var match = searchMatches[currentSearchMatch];
+            if (match.flatIdx !== selectedFlatIdx) return;
+            focusDetailMatch(match, query, false);
+        }
+
+        function highlightVariableAccess() {
+            if (!activeVariableAccess || activeVariableAccess.flatIdx !== selectedFlatIdx) return;
+            var match = variableParameterMatch(FLAT[selectedFlatIdx].node, activeVariableAccess);
+            if (match) focusDetailMatch(match, '', true);
+        }
+
+        function focusDetailMatch(match, searchText, wholeRow) {
+            var target = detailEl.querySelector('[data-match-key="' + match.key + '"]');
+            if (!target) return;
+
+            var pane = target.classList && target.classList.contains('qk-pane')
+                ? target : closest(target, 'qk-pane', detailEl);
+            if (pane) {
+                var io = closest(pane, 'qk-io', detailEl);
+                if (io) {
+                    var panes = io.querySelectorAll('.qk-pane');
+                    for (var p = 0; p < panes.length; p++) panes[p].classList.toggle('qk-pane-active', panes[p] === pane);
+                    var buttons = io.querySelectorAll('.qk-seg button');
+                    for (var b = 0; b < buttons.length; b++) {
+                        buttons[b].classList.toggle('qk-seg-active', buttons[b].getAttribute('data-seg') === pane.getAttribute('data-pane'));
+                    }
+                }
+            }
+
+            var highlighted = wholeRow ? closest(target, 'qk-output-history-row', detailEl) || closest(target, 'qk-io', detailEl) || target : target;
+            highlighted.classList.add('qk-search-current');
+            if (wholeRow) { highlighted.setAttribute('tabindex', '-1'); highlighted.focus({ preventScroll: true }); }
+            if (searchText) markSearchTextNodes(target, searchText);
+            try { target.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+            catch (e) { try { target.scrollIntoView(); } catch (ignore) { /* 旧 WebView */ } }
+        }
+
+        function markSearchTextNodes(root, searchText) {
+            if (!root || !searchText) return;
+            var qLower = searchText.toLowerCase();
+            var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+            var textNodes = [], node;
+            while ((node = walker.nextNode())) {
+                var parent = node.parentElement;
+                if (!parent || (parent.classList && parent.classList.contains('qk-copy'))) continue;
+                if (node.nodeValue && node.nodeValue.toLowerCase().indexOf(qLower) >= 0) textNodes.push(node);
+            }
+            for (var i = 0; i < textNodes.length; i++) {
+                var text = textNodes[i].nodeValue;
+                var lower = text.toLowerCase();
+                var fragment = document.createDocumentFragment();
+                var start = 0, at;
+                while ((at = lower.indexOf(qLower, start)) >= 0) {
+                    if (at > start) fragment.appendChild(document.createTextNode(text.slice(start, at)));
+                    var mark = document.createElement('mark');
+                    mark.className = 'qk-search-mark';
+                    mark.textContent = text.slice(at, at + searchText.length);
+                    fragment.appendChild(mark);
+                    start = at + searchText.length;
+                }
+                if (start < text.length) fragment.appendChild(document.createTextNode(text.slice(start)));
+                textNodes[i].parentNode.replaceChild(fragment, textNodes[i]);
+            }
+        }
+
+        // ---- 详情交互：分段切换 / 复制 / findstep ----
+        function onDetailClick(e) {
+            var extraValue = e.target.closest('[data-extra-index]');
+            if (extraValue) {
+                prepareDetailForSearchMatch({ variableOutputIndex: Number(extraValue.getAttribute('data-extra-index')) });
+                detailEl.innerHTML = renderDetail(FLAT[selectedFlatIdx].node);
+                highlightCurrentSearchMatch();
+                highlightVariableAccess();
+                detailEl.scrollTop = 0;
+                var target = document.getElementById('qk-variable-selected');
+                if (target) target.focus({ preventScroll: true });
+                return;
+            }
+            var extraHistory = e.target.closest('[data-extra-history]'), extraMore = e.target.closest('[data-extra-more]');
+            if (extraHistory || extraMore) {
+                if (extraHistory) extraVariableHistories.set(Number(extraHistory.getAttribute('data-extra-history')), Number(extraHistory.getAttribute('data-extra-count')));
+                else extraVariableLimit += 20;
+                var scrollTop = detailEl.scrollTop;
+                detailEl.innerHTML = renderDetail(FLAT[selectedFlatIdx].node);
+                highlightCurrentSearchMatch();
+                highlightVariableAccess();
+                detailEl.scrollTop = scrollTop;
+                var next;
+                if (extraHistory) {
+                    var group = detailEl.querySelector('[data-extra-group="' + extraHistory.getAttribute('data-extra-history') + '"]');
+                    next = extraHistory.hasAttribute('data-extra-history-more')
+                        ? group.querySelector('[data-extra-history-more]') || group.querySelector('.qk-write-history .qk-write-preview:last-of-type')
+                        : group.querySelector('[data-extra-history]');
+                } else next = detailEl.querySelector('[data-extra-more]');
+                // 继续加载时让新按钮（或最后一条记录）进入可视区，避免历史容器重建后焦点不可见。
+                (next || detailEl.querySelector('.qk-write-summary h3')).focus({
+                    preventScroll: !extraHistory || !extraHistory.hasAttribute('data-extra-history-more')
+                });
+                return;
+            }
+            var variableOpen = e.target.closest('[data-variable-open]');
+            if (variableOpen) {
+                pendingVariableSelection = { name: '', scopeId: null, mode: 'write' };
+                setVariablePanelOpen(true);
+                return;
+            }
+            var variableLink = e.target.closest('[data-variable-name]');
+            if (variableLink) {
+                pendingVariableSelection = { name: variableLink.getAttribute('data-variable-name'), scopeId: variableLink.getAttribute('data-variable-scope') || 'unknown' };
+                setVariablePanelOpen(true);
+                return;
+            }
+            var directTarget = e.target;
+            if (directTarget && directTarget.getAttribute) {
+                var selectFlat = directTarget.getAttribute('data-select-flat');
+                if (selectFlat !== null) {
+                    selectByFlatIdx(parseInt(selectFlat, 10), true);
+                    e.preventDefault();
+                    return;
+                }
+                var selectNode = directTarget.getAttribute('data-select-node');
+                if (selectNode !== null && flatIndexById[selectNode] !== undefined) {
+                    selectByFlatIdx(flatIndexById[selectNode], true);
+                    e.preventDefault();
+                    return;
+                }
+                var outputGroup = directTarget.getAttribute('data-output-group');
+                if (outputGroup !== null && selectedFlatIdx >= 0) {
+                    var selectedNode = FLAT[selectedFlatIdx].node;
+                    var expandedKey = selectedNode.id + ':' + outputGroup;
+                    if (expandedOutputGroups.has(expandedKey)) expandedOutputGroups.delete(expandedKey);
+                    else expandedOutputGroups.add(expandedKey);
+                    var scrollTop = detailEl.scrollTop;
+                    detailEl.innerHTML = renderDetail(selectedNode);
+                    detailEl.scrollTop = scrollTop;
+                    highlightCurrentSearchMatch();
+                    highlightVariableAccess();
+                    e.preventDefault();
+                    return;
+                }
+            }
+            var seg = closest(e.target, 'qk-seg', detailEl);
+            var segBtn = e.target && e.target.getAttribute && e.target.getAttribute('data-seg');
+            if (seg && segBtn) {
+                var io = closest(e.target, 'qk-io', detailEl);
+                if (io) {
+                    var btns = seg.querySelectorAll('button');
+                    for (var b = 0; b < btns.length; b++) btns[b].classList.remove('qk-seg-active');
+                    e.target.classList.add('qk-seg-active');
+                    var panes = io.querySelectorAll('.qk-pane');
+                    for (var p = 0; p < panes.length; p++) {
+                        panes[p].classList.toggle('qk-pane-active', panes[p].getAttribute('data-pane') === segBtn);
+                    }
+                }
+                e.preventDefault();
+                return;
+            }
+            var copyBtn = e.target;
+            if (copyBtn && copyBtn.classList && copyBtn.classList.contains('qk-copy')) {
+                var ci = parseInt(copyBtn.getAttribute('data-copy'), 10);
+                copyText(copyTexts[ci] || '');
+                var old = copyBtn.textContent;
+                copyBtn.textContent = '已复制';
+                copyBtn.classList.add('qk-copied');
+                setTimeout(function () { copyBtn.textContent = old; copyBtn.classList.remove('qk-copied'); }, 1200);
+                e.preventDefault();
+                return;
+            }
+            var fs = e.target;
+            if (fs && fs.getAttribute && fs.getAttribute('data-findstep') != null) {
+                var findTarget = fs.getAttribute('data-find-target') || META.actionId;
+                if (findTarget) {
+                    var sourcePath = fs.getAttribute('data-find-source') || '';
+                    var findHash = fs.getAttribute('data-find-hash') || META.snapshotHash;
+                    var sourceLocator = sourcePath && findHash
+                        ? encodeURIComponent(findHash + ',' + sourcePath)
+                        : '';
+                    nav('quicker:findstep:' + findTarget + ';' + sourceLocator + ';' +
+                        (fs.getAttribute('data-findstep') || ''));
+                }
+                e.preventDefault();
+            }
+        }
+
+        // ---- 分隔条拖动 ----
+        function wireSplitter() {
+            var dragging = false;
+            splitterEl.addEventListener('mousedown', function (e) {
+                dragging = true;
+                splitterEl.classList.add('qk-dragging');
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+            window.addEventListener('mousemove', function (e) {
+                if (!dragging) return;
+                var mainRect = document.getElementById('qk-main').getBoundingClientRect();
+                var w = e.clientX - mainRect.left;
+                w = Math.max(200, Math.min(mainRect.width - 260, w));
+                treePaneEl.style.width = w + 'px';
+                requestRender();
+            });
+            window.addEventListener('mouseup', function () {
+                if (!dragging) return;
+                dragging = false;
+                splitterEl.classList.remove('qk-dragging');
+                document.body.style.userSelect = '';
+            });
+        }
+
+        // ---- 工具 ----
+        function nav(url) { try { window.open(url, '_self'); } catch (e) { location.href = url; } }
+
+        function copyText(text) {
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); return; }
+            } catch (e) { /* 回退 execCommand */ }
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus(); ta.select();
+            try { document.execCommand('copy'); } catch (e2) { /* 忽略 */ }
+            document.body.removeChild(ta);
+        }
+
+        function closest(el, cls, stop) {
+            while (el && el !== stop) {
+                if (el.classList && el.classList.contains(cls)) return el;
+                el = el.parentElement;
+            }
+            return null;
+        }
+    }
+
+    // ==================== 导出 / 启动 ====================
+
+    var api = {
+        createVariableScopeLabeler: createVariableScopeLabeler,
+        variableWriteSummary: variableWriteSummary,
+        variableParameterMatch: variableParameterMatch,
+        createVariableCandidateSelector: createVariableCandidateSelector, variableListPreview: variableListPreview,
+        variablePanelHeight: variablePanelHeight,
+        collectVariableAccesses: collectVariableAccesses, filterVariableAccesses: filterVariableAccesses,
+        buildVariableIndexAsync: buildVariableIndexAsync, lookupVariableAccesses: lookupVariableAccesses,
+        lookupVariableAccessesAsync: lookupVariableAccessesAsync,
+        esc: esc, isContainerKind: isContainerKind, flattenTree: flattenTree,
+        createDefaultCollapsed: createDefaultCollapsed,
+        nodeStatusMatches: nodeStatusMatches, nodeSearchText: nodeSearchText, nodeMatchesSearch: nodeMatchesSearch,
+        searchableValueText: searchableValueText, collectNodeSearchMatches: collectNodeSearchMatches,
+        collectSearchMatches: collectSearchMatches, buildSearchMatchCounts: buildSearchMatchCounts,
+        computeVisible: computeVisible, findNextIndex: findNextIndex, findVisibleNeighbor: findVisibleNeighbor,
+        isDescendantOf: isDescendantOf, selectionAfterCollapse: selectionAfterCollapse, isFailedNode: isFailedNode,
+        hasAttentionMessage: hasAttentionMessage, isAttentionNode: isAttentionNode, summarizeFlat: summarizeFlat,
+        topSlowSteps: topSlowSteps, summarizeLoopIterations: summarizeLoopIterations, groupOutputs: groupOutputs, outputLabel: outputLabel,
+        resolveValue: resolveValue, originLabel: originLabel, exprTabLabel: exprTabLabel,
+        parseOffsetMin: parseOffsetMin, fmtTimeTitle: fmtTimeTitle, fmtDur: fmtDur, markHits: markHits
+    };
+
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = api;
+    } else {
+        global.QuickerDebugViewer = api;
+    }
+
+    if (typeof document !== 'undefined') {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bootViewer);
+        } else {
+            bootViewer();
+        }
+    }
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+</body></html>
