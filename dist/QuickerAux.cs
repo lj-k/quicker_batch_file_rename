@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.16
+// 版本：0.06.17
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,7 +31,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.16
+// 版本：0.06.17
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -2981,7 +2981,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.16
+// 版本：0.06.17
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -3207,8 +3207,8 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
             dataContext["startYear"] = 2000;
 
         // 取消或直接关闭窗口时，输出为空列表，避免残留上一次的结果。
-        // 交付方案2不生成/输出列表变量。
-        if (DeliveryMode != 2)
+        // 交付方案2/3不生成/输出列表变量。
+        if (DeliveryMode != 2 && DeliveryMode != 3)
         {
             dataContext["origPaths"] = new List<object>();
             dataContext["targetPaths"] = new List<object>();
@@ -3478,6 +3478,7 @@ private static void AttachEvents(Window win)
     AttachClick("BtnSavePreset", SavePreset_Click);
     AttachClick("BtnLoadExtPreset", LoadExtPreset_Click);
     AttachClick("BtnSaveExtPreset", SaveExtPreset_Click);
+    AttachClick("BtnRefreshSelection", RefreshSelection_Click);
     AttachClick("BtnPreview", Preview_Click);
     AttachClick("BtnCancel", Cancel_Click);
     AttachClick("BtnApply", Apply_Click);
@@ -3523,6 +3524,7 @@ private static void AttachToolTips()
     SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n两个合并开关可压缩模板产生的重复文件夹层级，不修改根路径本身。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
     SetTip(_realTimeCheck, "实时刷新开关。\n开启：配置变更后立即重算目标路径（文本输入约250ms防抖）。\n关闭：配置变更只更新配置/日期数据，目标路径保持旧值；需点击【预览】刷新，预览过期时【生成输出】禁用。");
     SetTip(_previewButton, "按当前配置重新计算目标路径，并启动必要的校验码计算。\n用于实时刷新关闭后的手动刷新，也可主动重新预览。");
+    SetTipByName("BtnRefreshSelection", "重新读取当前文件资源管理器窗口中选中的文件，并用该列表替换当前输入。\n只读取已存在的文件；未选中任何文件时会提示。\n扫描中点击会取消当前扫描并重新读取；执行文件操作期间不可使用。");
     SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n每项右侧的🖊用于重命名该预设，❌用于删除该预设；删除不可撤销。\n若词典是旧版单预设，会显示为“默认”。");
     SetTip(_savePresetButton, "保存当前全部配置为命名预设。\n会要求输入预设名称；若同名预设已存在，会列出变更项目并询问是否覆盖。\n预设保存在动作词典【批量重命名器预设】中。");
     SetTip(_algorithmCombo, "校验算法。\n最高16进制位数：CRC32=8、BLAKE3=64、MD5=32、SHA-256=64。\n切换算法时，若原位数是旧算法最高值，会自动改为新算法最高值。");
@@ -6074,6 +6076,235 @@ private static void Preview_Click(object sender, RoutedEventArgs e)
     RefreshPreviewNow();
 }
 
+private static void RefreshSelection_Click(object sender, RoutedEventArgs e)
+{
+    if (_executing)
+    {
+        MessageBox.Show("正在执行文件操作，请等待完成后再重新获取。", "重新获取选择的文件",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    List<string> selected = GetExplorerSelectedPaths();
+    if (selected.Count == 0)
+    {
+        MessageBox.Show("未选中任何文件。", "重新获取选择的文件",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    ReplaceInputSelection(selected);
+}
+
+// 读取资源管理器窗口的选中项；仅保留仍存在的文件，忽略文件夹与虚拟项。
+private static List<string> GetExplorerSelectedPaths()
+{
+    List<string> paths = new List<string>();
+    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    object shell = null;
+    object windows = null;
+    try
+    {
+        Type shellType = Type.GetTypeFromProgID("Shell.Application");
+        if (shellType == null)
+            return paths;
+        shell = Activator.CreateInstance(shellType);
+        try
+        {
+            windows = shellType.InvokeMember("Windows", BindingFlags.InvokeMethod,
+                null, shell, null);
+        }
+        catch
+        {
+            windows = InvokeCom(shell, "Windows", true);
+        }
+        List<object> windowItems = GetComItems(windows);
+        if (windowItems.Count == 0)
+            return paths;
+
+        foreach (object window in windowItems)
+        {
+            object document = InvokeCom(window, "Document", true);
+            if (document == null)
+                continue;
+            object selected = InvokeCom(document, "SelectedItems", false);
+            List<object> selectedItems = GetComItems(selected);
+            foreach (object item in selectedItems)
+            {
+                string path = Convert.ToString(InvokeCom(item, "Path", true),
+                    CultureInfo.InvariantCulture);
+                if (path == null || path.Length == 0)
+                    continue;
+                try
+                {
+                    if (!File.Exists(path))
+                        continue;
+                }
+                catch
+                {
+                    continue;
+                }
+                if (seen.Add(path))
+                    paths.Add(path);
+            }
+        }
+    }
+    catch
+    {
+    }
+    finally
+    {
+        ReleaseComObject(windows);
+        ReleaseComObject(shell);
+    }
+    return paths;
+}
+
+// 读取 COM 集合：优先 IEnumerable，否则按 Count/Item 逐个取。
+private static List<object> GetComItems(object collection)
+{
+    List<object> items = new List<object>();
+    if (collection == null)
+        return items;
+    IEnumerable enumerable = collection as IEnumerable;
+    if (enumerable != null)
+    {
+        foreach (object item in enumerable)
+        {
+            if (item != null)
+                items.Add(item);
+        }
+        return items;
+    }
+
+    object countValue = InvokeCom(collection, "Count", true);
+    int count;
+    if (!int.TryParse(Convert.ToString(countValue, CultureInfo.InvariantCulture),
+        NumberStyles.Integer, CultureInfo.InvariantCulture, out count))
+        return items;
+    for (int i = 0; i < count; i++)
+    {
+        object item = InvokeCom(collection, "Item", false, new object[] { i });
+        if (item != null)
+            items.Add(item);
+    }
+    return items;
+}
+
+// COM 晚绑定：属性与方法各尝试一次，兼容不同 Shell 版本的 IDispatch 暴露方式。
+private static object InvokeCom(object target, string name, bool preferProperty)
+{
+    return InvokeCom(target, name, preferProperty, null);
+}
+
+private static object InvokeCom(object target, string name, bool preferProperty, object[] args)
+{
+    if (target == null)
+        return null;
+    BindingFlags first = preferProperty ? BindingFlags.GetProperty : BindingFlags.InvokeMethod;
+    try
+    {
+        return target.GetType().InvokeMember(name, first, null, target, args);
+    }
+    catch
+    {
+    }
+    BindingFlags second = preferProperty ? BindingFlags.InvokeMethod : BindingFlags.GetProperty;
+    try
+    {
+        return target.GetType().InvokeMember(name, second, null, target, args);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+private static void ReleaseComObject(object value)
+{
+    try
+    {
+        if (value != null && Marshal.IsComObject(value))
+            Marshal.ReleaseComObject(value);
+    }
+    catch
+    {
+    }
+}
+
+// 用新的选择替换当前输入：取消旧扫描/哈希，清空行与路径，再按新列表重新扫描。
+private static void ReplaceInputSelection(List<string> selected)
+{
+    _scanGeneration++;
+    _hashGeneration++;
+    _hashStop = true;
+    _hashRunning = false;
+    _hashAlgorithm = "";
+    _scanning = false;
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+    if (_gridFilterTimer != null)
+        _gridFilterTimer.Stop();
+    CloseHeaderFilterPopup();
+
+    _rows = new ObservableCollection<Dictionary<string, object>>();
+    _files = new List<Dictionary<string, object>>();
+    _paths = new List<string>();
+    _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    _skippedFolders = 0;
+    _skippedInvalid = 0;
+    _previewDirty = false;
+    _hashTotal = 0;
+    _hashDone = 0;
+    _progress.Visibility = Visibility.Collapsed;
+    _grid.ItemsSource = _rows;
+    if (_grid.Columns != null)
+    {
+        for (int i = 0; i < _grid.Columns.Count; i++)
+            _grid.Columns[i].SortDirection = null;
+    }
+    ApplyGridFilter();
+    RefreshErrorBanner("");
+
+    for (int i = 0; i < selected.Count; i++)
+        AddInputPath(selected[i]);
+
+    if (_data != null)
+    {
+        List<object> fileList = new List<object>();
+        for (int i = 0; i < _paths.Count; i++)
+            fileList.Add(_paths[i]);
+        _data["files"] = fileList;
+        if (DeliveryMode != 2 && DeliveryMode != 3)
+        {
+            _data["origPaths"] = new List<object>();
+            _data["targetPaths"] = new List<object>();
+            _data["actions"] = new List<object>();
+        }
+    }
+
+    _scanPerfText = "";
+    _layoutPerfText = "";
+    _scanPerfStartTicks = 0;
+    _scanPerfCpuStart = TimeSpan.Zero;
+    _scanPerfCpuValid = false;
+    _scanPerfBuildTicks = 0;
+    _scanPerfWorkerCount = 0;
+    _scanPerfPathCount = 0;
+    UpdatePerfText();
+    UpdateStatus();
+
+    if (_paths.Count == 0)
+    {
+        MessageBox.Show("没有可处理的文件。", "重新获取选择的文件",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    StartScan();
+    _statusText.Text = "已重新获取 " + _paths.Count + " 个文件，正在读取属性…";
+}
+
 private static void RefreshPreviewNow()
 {
     if (_scanning || _config == null)
@@ -6964,7 +7195,7 @@ private static string PromptForPresetName(string initialName, string title, stri
 
 private static void Apply_Click(object sender, RoutedEventArgs e)
 {
-    if (DeliveryMode == 2)
+    if (DeliveryMode == 2 || DeliveryMode == 3)
         return;
 
     if (_scanning)
@@ -7017,7 +7248,7 @@ private static void Finish_Click(object sender, RoutedEventArgs e)
     if (_executing)
         return;
 
-    if (DeliveryMode == 2)
+    if (DeliveryMode == 2 || DeliveryMode == 3)
     {
         // 执行方案不生成/输出列表变量，只写回预设并继续 Quicker 后续步骤。
         EnsureDefaultPreset();
@@ -7655,7 +7886,7 @@ private static void SetExecutionUiEnabled(bool enabled)
 
 private static void WriteOutputs(List<Dictionary<string, object>> sourceRows)
 {
-    if (_data == null || DeliveryMode == 2)
+    if (_data == null || DeliveryMode == 2 || DeliveryMode == 3)
         return;
 
     List<object> originalPaths = new List<object>();

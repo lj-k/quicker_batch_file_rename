@@ -12,6 +12,7 @@ RELEASE = ROOT / "release"
 
 SCHEME1 = RELEASE / "方案1-仅重命名不执行"
 SCHEME2 = RELEASE / "方案2-执行不输出列表"
+SCHEME3 = RELEASE / "方案3-重复获取+重命名+执行"
 
 
 def remove_marked_block(text, begin, end):
@@ -29,7 +30,7 @@ def strip_markers(text, begin, end):
 
 
 def write_variant(name, xaml_text, mode):
-    folder = SCHEME1 if mode == 1 else SCHEME2
+    folder = SCHEME1 if mode == 1 else (SCHEME2 if mode == 2 else SCHEME3)
     folder.mkdir(parents=True, exist_ok=True)
     xaml_path = folder / "CustomWindow.xaml"
     xaml_path.write_text(xaml_text, encoding="utf-8")
@@ -66,6 +67,16 @@ def main():
     scheme2 = strip_markers(scheme2, "RELEASE-EXEC-BEGIN", "RELEASE-EXEC-END")
     scheme2 = strip_markers(scheme2, "RELEASE-FINISH-BEGIN", "RELEASE-FINISH-END")
     write_variant("scheme2", scheme2, 2)
+
+    # 方案3与方案2共用“执行/完成”界面，额外通过重新获取按钮支持多批处理。
+    scheme3 = remove_marked_block(source, "RELEASE-APPLY-BEGIN", "RELEASE-APPLY-END")
+    scheme3 = strip_markers(scheme3, "RELEASE-EXEC-BEGIN", "RELEASE-EXEC-END")
+    scheme3 = strip_markers(scheme3, "RELEASE-FINISH-BEGIN", "RELEASE-FINISH-END")
+    scheme3 = scheme3.replace('Title="批量重命名器"',
+                              'Title="批量重命名器（重复获取+重命名+执行）"')
+    scheme3 = scheme3.replace('Text="左侧配置，右侧点击胶囊插入模板"',
+                              'Text="重新获取选择的文件，可连续处理多批"')
+    write_variant("scheme3", scheme3, 3)
 
 
 if __name__ == "__main__":
