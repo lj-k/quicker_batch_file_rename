@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.06.5] - 2026-11-14
+
+### Changed
+
+- 【批量重命名器预设】统一为扁平词典：key为预设名称，value为该预设完整配置的JSON字符串。
+- 载入预设时读取选中value，解析JSON后恢复全部配置，不再依赖嵌套`presets`结构。
+- 兼容旧嵌套结构 `{presetVersion, presets:{...}}` 与更旧单预设词典，读取时自动迁移。
+- 全部配置键由 `PresetConfigKeys` 统一定义，`BuildPresetDictionary` 与 `CreateDefaultConfig` 键集合双向一致。
+
+### Added
+
+- 核心新增 `BuildFlatPresetDictionary`、`ParsePresetDictionary`、`SerializeJsonValue` 与 `PresetConfigKeys`。
+- 新增 62 项扁平预设结构、JSON序列化、全配置键覆盖与旧结构迁移测试。
+
+### Verified
+
+- 核心测试 284 项通过，0 项失败。
+- 辅助 C# 按 C# 5 / .NET Framework 4.8 参考程序集编译通过。
+- 两套 release 重新生成；XAML 解析、控件命名与版本一致性校验通过。
+
 ## [0.06.4] - 2026-11-14
 
 ### Added

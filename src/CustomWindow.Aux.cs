@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.4
+// 版本：0.06.5
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2336,40 +2336,14 @@ private static string FindExtensionPresetKey(Dictionary<string, string> store, s
 
 private static Dictionary<string, Dictionary<string, object>> LoadPresetStore()
 {
-    Dictionary<string, Dictionary<string, object>> store =
-        new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
-
     if (_data == null)
-        return store;
+        return new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
 
     object presetObject;
     if (!_data.TryGetValue("preset", out presetObject) || presetObject == null)
-        return store;
+        return new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
 
-    IDictionary<string, object> root = AsObjectDictionary(presetObject);
-    if (root == null)
-        return store;
-
-    object presetsObject;
-    if (root.TryGetValue("presets", out presetsObject) && presetsObject != null)
-    {
-        IDictionary<string, object> presets = AsObjectDictionary(presetsObject);
-        if (presets != null)
-        {
-            foreach (KeyValuePair<string, object> pair in presets)
-            {
-                IDictionary<string, object> config = AsObjectDictionary(pair.Value);
-                if (config != null)
-                    store[pair.Key] = CopyObjectDictionary(config);
-            }
-        }
-        return store;
-    }
-
-    if (LooksLikePresetConfig(root))
-        store["默认"] = CopyObjectDictionary(root);
-
-    return store;
+    return ParsePresetDictionary(presetObject);
 }
 
 private static void SavePresetStore(Dictionary<string, Dictionary<string, object>> store)
@@ -2377,19 +2351,12 @@ private static void SavePresetStore(Dictionary<string, Dictionary<string, object
     if (_data == null)
         return;
 
-    Dictionary<string, object> root =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    root["presetVersion"] = "0.05";
-
-    Dictionary<string, object> presets =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    foreach (KeyValuePair<string, Dictionary<string, object>> pair in store)
-        presets[pair.Key] = pair.Value;
-    root["presets"] = presets;
-    _data["preset"] = root;
+    // 统一为“预设名 -> 配置JSON字符串”的扁平词典，避免嵌套词典状态读回退化。
+    Dictionary<string, object> flat = BuildFlatPresetDictionary(store);
+    _data["preset"] = flat;
 
     // 尽量实时同步到动作变量；若当前Quicker版本未暴露Context，则仍会在窗口关闭时写回。
-    PublishActionVariable("批量重命名器预设", root);
+    PublishActionVariable("批量重命名器预设", flat);
 }
 
 private static void PrimePresetVariables()
@@ -2614,21 +2581,6 @@ private static IDictionary<string, object> AsObjectDictionary(object value)
     if (!TryParseJson(text, out parsed))
         return null;
     return AsObjectDictionary(parsed);
-}
-
-private static Dictionary<string, object> CopyObjectDictionary(IDictionary<string, object> source)
-{
-    Dictionary<string, object> copy =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    foreach (KeyValuePair<string, object> pair in source)
-        copy[pair.Key] = pair.Value;
-    return copy;
-}
-
-private static bool LooksLikePresetConfig(IDictionary<string, object> dictionary)
-{
-    return dictionary.ContainsKey("rootMode") || dictionary.ContainsKey("template") ||
-        dictionary.ContainsKey("dateSource") || dictionary.ContainsKey("checksumAlgorithm");
 }
 
 private static string FindPresetKey(Dictionary<string, Dictionary<string, object>> store, string name)

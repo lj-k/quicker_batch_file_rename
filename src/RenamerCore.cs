@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -10,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.4
+// 版本：0.06.5
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -21,6 +22,15 @@ public const string RenameDefaultTemplate = "【根路径】/【源文件名】-
 
 public static readonly string[] SupportedAlgorithms = new string[] { "CRC32", "BLAKE3", "MD5", "SHA-256" };
 public static readonly string[] SupportedDateSources = new string[] { "filename", "exif", "modified", "created" };
+public static readonly string[] PresetConfigKeys = new string[] {
+    "rootMode", "rootPath", "startYear",
+    "filterExtensions", "filterMode",
+    "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
+    "preferExifOnFilenameConflict",
+    "realTimePreview", "execParallel", "execVerify",
+    "checksumAlgorithm", "checksumDigits", "checksumPrefix", "checksumSuffix",
+    "template"
+};
 public static readonly string[] TemplateTokens = new string[] {
     "【日期yyyy】", "【日期mm】", "【日期dd】", "【根路径】",
     "【源文件名】", "【扩展名】", "【校验码】"
@@ -1903,23 +1913,8 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
     preset["presetVersion"] = "0.05";
-    preset["rootMode"] = normalized["rootMode"];
-    preset["rootPath"] = normalized["rootPath"];
-    preset["startYear"] = normalized["startYear"];
-    preset["filterExtensions"] = normalized["filterExtensions"];
-    preset["filterMode"] = normalized["filterMode"];
-    preset["dateSource"] = normalized["dateSource"];
-    preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
-    preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
-    preset["preferExifOnFilenameConflict"] = normalized["preferExifOnFilenameConflict"];
-    preset["realTimePreview"] = normalized["realTimePreview"];
-    preset["execParallel"] = normalized["execParallel"];
-    preset["execVerify"] = normalized["execVerify"];
-    preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
-    preset["checksumDigits"] = normalized["checksumDigits"];
-    preset["checksumPrefix"] = normalized["checksumPrefix"];
-    preset["checksumSuffix"] = normalized["checksumSuffix"];
-    preset["template"] = normalized["template"];
+    for (int i = 0; i < PresetConfigKeys.Length; i++)
+        preset[PresetConfigKeys[i]] = normalized[PresetConfigKeys[i]];
     return preset;
 }
 
@@ -1962,6 +1957,235 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
         NormalizeConfig(config);
     }
     return applied;
+}
+
+// 预设词典统一为“预设名 -> 配置JSON字符串”的扁平结构。
+// 这样Quicker“保存为状态”读回时仍是字符串值，不会因嵌套词典退化而丢失预设。
+public static Dictionary<string, object> BuildFlatPresetDictionary(
+    IDictionary<string, Dictionary<string, object>> store)
+{
+    Dictionary<string, object> flat =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    if (store == null)
+        return flat;
+
+    foreach (KeyValuePair<string, Dictionary<string, object>> pair in store)
+    {
+        if (pair.Key == null || pair.Key.Trim().Length == 0)
+            continue;
+        flat[pair.Key] = SerializeJsonValue(pair.Value);
+    }
+    return flat;
+}
+
+public static Dictionary<string, Dictionary<string, object>> ParsePresetDictionary(object value)
+{
+    Dictionary<string, Dictionary<string, object>> store =
+        new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+    IDictionary<string, object> root = ConvertToObjectDictionary(value);
+    if (root == null)
+        return store;
+
+    object presetsObject;
+    if (root.ContainsKey("presetVersion") &&
+        root.TryGetValue("presets", out presetsObject) && presetsObject != null)
+    {
+        // 旧结构：{ presetVersion, presets: { 名称: 配置词典 } }
+        IDictionary<string, object> presets = ConvertToObjectDictionary(presetsObject);
+        if (presets != null)
+        {
+            foreach (KeyValuePair<string, object> pair in presets)
+            {
+                IDictionary<string, object> config = ConvertToObjectDictionary(pair.Value);
+                if (config != null)
+                    store[pair.Key] = CopyPresetDictionary(config);
+            }
+        }
+        return store;
+    }
+
+    if (LooksLikePresetConfigDictionary(root))
+    {
+        // 更旧结构：单个配置词典直接作为预设。
+        store["默认"] = CopyPresetDictionary(root);
+        return store;
+    }
+
+    // 新结构：{ 预设名: 配置JSON字符串 }
+    foreach (KeyValuePair<string, object> pair in root)
+    {
+        if (pair.Key == null || pair.Key.Trim().Length == 0)
+            continue;
+        IDictionary<string, object> config = ConvertToObjectDictionary(pair.Value);
+        if (config != null)
+            store[pair.Key] = CopyPresetDictionary(config);
+    }
+    return store;
+}
+
+public static string SerializeJsonValue(object value)
+{
+    StringBuilder builder = new StringBuilder();
+    AppendJsonValue(builder, value);
+    return builder.ToString();
+}
+
+private static void AppendJsonValue(StringBuilder builder, object value)
+{
+    if (value == null)
+    {
+        builder.Append("null");
+        return;
+    }
+
+    string text = value as string;
+    if (text != null)
+    {
+        AppendJsonString(builder, text);
+        return;
+    }
+
+    if (value is bool)
+    {
+        builder.Append(((bool)value) ? "true" : "false");
+        return;
+    }
+
+    if (value is int || value is long || value is short || value is byte ||
+        value is uint || value is ulong || value is ushort || value is sbyte ||
+        value is double || value is float || value is decimal)
+    {
+        builder.Append(Convert.ToString(value, CultureInfo.InvariantCulture));
+        return;
+    }
+
+    IDictionary<string, object> generic = value as IDictionary<string, object>;
+    if (generic != null)
+    {
+        AppendJsonObject(builder, generic);
+        return;
+    }
+
+    IDictionary dictionary = value as IDictionary;
+    if (dictionary != null)
+    {
+        Dictionary<string, object> converted =
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        foreach (DictionaryEntry entry in dictionary)
+            converted[Convert.ToString(entry.Key, CultureInfo.InvariantCulture)] = entry.Value;
+        AppendJsonObject(builder, converted);
+        return;
+    }
+
+    IEnumerable enumerable = value as IEnumerable;
+    if (enumerable != null)
+    {
+        builder.Append('[');
+        bool first = true;
+        foreach (object item in enumerable)
+        {
+            if (!first)
+                builder.Append(',');
+            first = false;
+            AppendJsonValue(builder, item);
+        }
+        builder.Append(']');
+        return;
+    }
+
+    AppendJsonString(builder, Convert.ToString(value, CultureInfo.InvariantCulture));
+}
+
+private static void AppendJsonObject(StringBuilder builder, IDictionary<string, object> dictionary)
+{
+    builder.Append('{');
+    bool first = true;
+    foreach (KeyValuePair<string, object> pair in dictionary)
+    {
+        if (!first)
+            builder.Append(',');
+        first = false;
+        AppendJsonString(builder, pair.Key == null ? "" : pair.Key);
+        builder.Append(':');
+        AppendJsonValue(builder, pair.Value);
+    }
+    builder.Append('}');
+}
+
+private static void AppendJsonString(StringBuilder builder, string text)
+{
+    builder.Append('"');
+    if (text != null)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (ch == '"' || ch == '\\')
+            {
+                builder.Append('\\');
+                builder.Append(ch);
+            }
+            else if (ch == '\b') builder.Append("\\b");
+            else if (ch == '\f') builder.Append("\\f");
+            else if (ch == '\n') builder.Append("\\n");
+            else if (ch == '\r') builder.Append("\\r");
+            else if (ch == '\t') builder.Append("\\t");
+            else if (ch < ' ' || ch == '\u2028' || ch == '\u2029')
+            {
+                builder.Append("\\u");
+                builder.Append(((int)ch).ToString("x4", CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                builder.Append(ch);
+            }
+        }
+    }
+    builder.Append('"');
+}
+
+public static IDictionary<string, object> ConvertToObjectDictionary(object value)
+{
+    if (value == null)
+        return null;
+
+    IDictionary<string, object> generic = value as IDictionary<string, object>;
+    if (generic != null)
+        return generic;
+
+    IDictionary dictionary = value as IDictionary;
+    if (dictionary != null)
+    {
+        Dictionary<string, object> converted =
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        foreach (DictionaryEntry entry in dictionary)
+            converted[Convert.ToString(entry.Key, CultureInfo.InvariantCulture)] = entry.Value;
+        return converted;
+    }
+
+    string text = value as string;
+    if (text == null)
+        return null;
+
+    object parsed;
+    if (!TryParseJson(text, out parsed))
+        return null;
+    return ConvertToObjectDictionary(parsed);
+}
+
+private static Dictionary<string, object> CopyPresetDictionary(IDictionary<string, object> source)
+{
+    Dictionary<string, object> copy =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    foreach (KeyValuePair<string, object> pair in source)
+        copy[pair.Key] = pair.Value;
+    return copy;
+}
+
+private static bool LooksLikePresetConfigDictionary(IDictionary<string, object> dictionary)
+{
+    return dictionary.ContainsKey("rootMode") || dictionary.ContainsKey("template") ||
+        dictionary.ContainsKey("dateSource") || dictionary.ContainsKey("checksumAlgorithm");
 }
 
 // Quicker“保存为状态”会把嵌套词典序列化成JSON文本；启动时用以下解析器还原。

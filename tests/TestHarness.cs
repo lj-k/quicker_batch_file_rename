@@ -639,6 +639,94 @@ public static class TestHarness
         Check(!CoreUnderTest.TryParseJson("not json", out invalid), "preset json: reject text");
     }
 
+    private static void TestFlatPresetStore()
+    {
+        Dictionary<string, string> config = CoreUnderTest.CreateDefaultConfig(2000);
+        config["rootMode"] = "custom";
+        config["rootPath"] = @"D:\输出";
+        config["startYear"] = "1999";
+        config["filterExtensions"] = "jpg;png";
+        config["filterMode"] = "rename";
+        config["dateSource"] = "exif";
+        config["dateFallbackOrder"] = "filename,modified,created,empty,skip";
+        config["dateFallbackCustomText"] = "无日期";
+        config["preferExifOnFilenameConflict"] = "true";
+        config["realTimePreview"] = "false";
+        config["execParallel"] = "6";
+        config["execVerify"] = "false";
+        config["checksumAlgorithm"] = "SHA-256";
+        config["checksumDigits"] = "16";
+        config["checksumPrefix"] = "<";
+        config["checksumSuffix"] = ">";
+        config["template"] = "【根路径】/【源文件名】-【校验码】.【扩展名】";
+
+        Dictionary<string, object> preset = CoreUnderTest.BuildPresetDictionary(config);
+        for (int i = 0; i < CoreUnderTest.PresetConfigKeys.Length; i++)
+        {
+            string key = CoreUnderTest.PresetConfigKeys[i];
+            Check(config.ContainsKey(key) && preset.ContainsKey(key),
+                "flat preset: config key present " + key);
+        }
+        foreach (string key in preset.Keys)
+        {
+            if (key == "presetVersion")
+                continue;
+            Check(config.ContainsKey(key), "flat preset: no extra preset key " + key);
+        }
+
+        Dictionary<string, Dictionary<string, object>> store =
+            new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+        store["默认"] = preset;
+        store["图片\"截屏\\测试"] = CoreUnderTest.BuildPresetDictionary(
+            CoreUnderTest.CreateDefaultConfig(2000));
+
+        Dictionary<string, object> flat = CoreUnderTest.BuildFlatPresetDictionary(store);
+        Check(flat.Count == 2, "flat preset: stores two presets");
+        Check(flat["默认"] is string, "flat preset: value is json string");
+        string defaultJson = Convert.ToString(flat["默认"]);
+        Check(defaultJson.Contains("\"rootMode\":\"custom\""), "flat preset: json contains root mode");
+        Check(defaultJson.Contains("D:\\\\输出"), "flat preset: json escapes backslash");
+        Check(defaultJson.Contains("无日期"), "flat preset: json keeps chinese");
+
+        Dictionary<string, Dictionary<string, object>> parsed =
+            CoreUnderTest.ParsePresetDictionary(flat);
+        Check(parsed.Count == 2 && parsed.ContainsKey("默认") &&
+            parsed.ContainsKey("图片\"截屏\\测试"), "flat preset: parse names");
+
+        Dictionary<string, string> loaded = CoreUnderTest.CreateDefaultConfig(2000);
+        Check(CoreUnderTest.ApplyPresetDictionary(parsed["默认"], loaded),
+            "flat preset: apply parsed default");
+        for (int i = 0; i < CoreUnderTest.PresetConfigKeys.Length; i++)
+        {
+            string key = CoreUnderTest.PresetConfigKeys[i];
+            CheckEqual(config[key], loaded[key], "flat preset: roundtrip " + key);
+        }
+
+        Dictionary<string, object> oldRoot = new Dictionary<string, object>();
+        oldRoot["presetVersion"] = "0.05";
+        oldRoot["presets"] = store;
+        Dictionary<string, Dictionary<string, object>> oldParsed =
+            CoreUnderTest.ParsePresetDictionary(oldRoot);
+        Check(oldParsed.Count == 2 && oldParsed.ContainsKey("默认"),
+            "flat preset: migrate old nested structure");
+
+        Dictionary<string, Dictionary<string, object>> legacyParsed =
+            CoreUnderTest.ParsePresetDictionary(preset);
+        Check(legacyParsed.Count == 1 && legacyParsed.ContainsKey("默认"),
+            "flat preset: migrate legacy single preset");
+
+        Dictionary<string, object> stringState = new Dictionary<string, object>();
+        stringState["默认"] = defaultJson;
+        Check(CoreUnderTest.ParsePresetDictionary(stringState).ContainsKey("默认"),
+            "flat preset: parse json string value");
+
+        string escaped = CoreUnderTest.SerializeJsonValue("a\"b\\c\n图");
+        object escapedParsed;
+        Check(CoreUnderTest.TryParseJson(escaped, out escapedParsed) &&
+            Convert.ToString(escapedParsed) == "a\"b\\c\n图",
+            "flat preset: json serializer escapes text");
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -652,6 +740,7 @@ public static class TestHarness
         TestTransferEngine();
         TestPreset();
         TestPresetJsonState();
+        TestFlatPresetStore();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
         return _failed == 0 ? 0 : 1;
