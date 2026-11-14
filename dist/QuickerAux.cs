@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.03
+// 版本：0.04
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Collections;
 using System.Collections.ObjectModel;
+using System.Reflection;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,7 +28,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.03
+// 版本：0.04
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -119,64 +120,172 @@ public static string NormalizeDateSource(string source)
 
 public static string NormalizeFallbackOrder(string order)
 {
-    List<string> result = new List<string>();
-    if (order != null)
+    string[] defaults = new string[] { "filename", "exif", "modified", "created", "empty" };
+    string[] parts = order == null ? new string[0] : order.Split(',');
+    string[] result = new string[5];
+    for (int i = 0; i < result.Length; i++)
     {
-        string[] parts = order.Split(',');
-        for (int i = 0; i < parts.Length; i++)
-        {
-            string part = parts[i] == null ? "" : parts[i].Trim();
-            if (part.Length == 0)
-                continue;
-            string normalized = NormalizeDateSource(part);
-            if (!result.Contains(normalized))
-                result.Add(normalized);
-        }
+        string token = i < parts.Length ? NormalizeFallbackToken(parts[i]) : "";
+        result[i] = token.Length == 0 ? defaults[i] : token;
     }
-    for (int i = 0; i < SupportedDateSources.Length; i++)
-    {
-        if (!result.Contains(SupportedDateSources[i]))
-            result.Add(SupportedDateSources[i]);
-    }
-    return string.Join(",", result.ToArray());
+    return string.Join(",", result);
 }
 
-public static bool TryResolveEffectiveDate(IDictionary<string, DateTime?> dates,
-    string primarySource, bool fallbackEnabled, string fallbackOrder,
-    out DateTime? effectiveDate, out string effectiveSource)
+public static string NormalizeFallbackToken(string token)
+{
+    string value = (token == null ? "" : token.Trim()).ToLowerInvariant();
+    if (value.Length == 0)
+        return "";
+    if (value == "empty" || value == "null" || value == "空" || value == "空值")
+        return "empty";
+    if (value == "custom" || value == "自定义" || value == "自定义值")
+        return "custom";
+    if (value == "skip" || value == "跳过")
+        return "skip";
+
+    string source;
+    if (TryNormalizeDateSource(value, out source))
+        return source;
+    return "";
+}
+
+private static bool TryNormalizeDateSource(string value, out string source)
+{
+    source = "";
+    string normalized = (value == null ? "" : value.Trim()).ToLowerInvariant();
+    if (normalized == "filename" || normalized == "file" || normalized == "文件名" || normalized == "文件名中的日期")
+    {
+        source = "filename";
+        return true;
+    }
+    if (normalized == "exif" || normalized == "exif拍摄日期" || normalized == "拍摄日期")
+    {
+        source = "exif";
+        return true;
+    }
+    if (normalized == "modified" || normalized == "修改" || normalized == "修改日期")
+    {
+        source = "modified";
+        return true;
+    }
+    if (normalized == "created" || normalized == "创建" || normalized == "创建日期")
+    {
+        source = "created";
+        return true;
+    }
+    return false;
+}
+
+public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
+    string primarySource, string fallbackOrder, string customText,
+    out DateTime? effectiveDate, out string effectiveSource,
+    out string missingText, out bool skipped)
 {
     effectiveDate = null;
     effectiveSource = "";
+    missingText = "";
+    skipped = false;
 
-    if (dates == null)
-        return false;
-
-    string primary = NormalizeDateSource(primarySource);
-    DateTime? value;
-    if (dates.TryGetValue(primary, out value) && value.HasValue)
+    if (dates != null)
     {
-        effectiveDate = value;
-        effectiveSource = primary;
-        return true;
-    }
-
-    if (!fallbackEnabled)
-        return false;
-
-    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
-    for (int i = 0; i < order.Length; i++)
-    {
-        string source = order[i];
-        if (source == primary)
-            continue;
-        if (dates.TryGetValue(source, out value) && value.HasValue)
+        string primary = NormalizeDateSource(primarySource);
+        DateTime? value;
+        if (dates.TryGetValue(primary, out value) && value.HasValue)
         {
             effectiveDate = value;
-            effectiveSource = source;
-            return true;
+            effectiveSource = primary;
+            return;
+        }
+
+        string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+        for (int i = 0; i < order.Length; i++)
+        {
+            string token = order[i];
+            if (token == "empty")
+            {
+                effectiveSource = "empty";
+                return;
+            }
+            if (token == "custom")
+            {
+                effectiveSource = "custom";
+                missingText = customText == null ? "" : customText;
+                return;
+            }
+            if (token == "skip")
+            {
+                effectiveSource = "skip";
+                skipped = true;
+                return;
+            }
+            if (dates.TryGetValue(token, out value) && value.HasValue)
+            {
+                effectiveDate = value;
+                effectiveSource = token;
+                return;
+            }
         }
     }
-    return false;
+
+    effectiveSource = "empty";
+}
+
+public static string NormalizeExtensionList(string value)
+{
+    if (value == null)
+        return "";
+    string[] parts = value.Split(new char[] { ',', ';', ' ', '\t', '\r', '\n', '|' });
+    List<string> result = new List<string>();
+    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    for (int i = 0; i < parts.Length; i++)
+    {
+        string part = (parts[i] == null ? "" : parts[i].Trim());
+        if (part.Length == 0)
+            continue;
+        if (part == "*" || part == "*.*" || part.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            if (seen.Add("*"))
+                result.Add("*");
+            continue;
+        }
+        part = part.TrimStart('*').TrimStart('.').Trim().ToLowerInvariant();
+        if (part.Length == 0)
+            continue;
+        if (seen.Add(part))
+            result.Add(part);
+    }
+    return string.Join(";", result.ToArray());
+}
+
+public static string NormalizeFilterMode(string mode)
+{
+    string value = (mode == null ? "" : mode.Trim()).ToLowerInvariant();
+    if (value == "execute" || value == "执行" || value == "白名单" || value == "include")
+        return "execute";
+    return "skip";
+}
+
+public static bool ShouldSkipByFilter(string extension, string extensions, string mode)
+{
+    string list = NormalizeExtensionList(extensions);
+    if (list.Length == 0)
+        return false;
+
+    bool match = false;
+    string[] items = list.Split(';');
+    string normalized = (extension == null ? "" : extension.Trim().TrimStart('.')).ToLowerInvariant();
+    for (int i = 0; i < items.Length; i++)
+    {
+        if (items[i] == "*" || items[i] == normalized)
+        {
+            match = true;
+            break;
+        }
+    }
+
+    if (NormalizeFilterMode(mode) == "execute")
+        return !match;
+    return match;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -1018,12 +1127,11 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["rootMode"] = "current";
     config["rootPath"] = "";
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
+    config["filterExtensions"] = "";
+    config["filterMode"] = "skip";
     config["dateSource"] = "filename";
-    config["dateFallbackEnabled"] = "true";
-    config["dateFallbackOrder"] = NormalizeFallbackOrder(null);
-    config["dateFallback5Text"] = "";
-    config["dateMissingMode"] = "empty";
-    config["dateMissingText"] = "";
+    config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
+    config["dateFallbackCustomText"] = "";
     config["realTimePreview"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
@@ -1086,13 +1194,24 @@ public static void NormalizeConfig(Dictionary<string, string> config)
         startYear = 2000;
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
 
+    config["filterExtensions"] = NormalizeExtensionList(GetConfigString(config, "filterExtensions", ""));
+    config["filterMode"] = NormalizeFilterMode(GetConfigString(config, "filterMode", "skip"));
+
     config["dateSource"] = NormalizeDateSource(GetConfigString(config, "dateSource", "filename"));
-    config["dateFallbackEnabled"] = GetConfigBool(config, "dateFallbackEnabled", true) ? "true" : "false";
-    config["dateFallbackOrder"] = NormalizeFallbackOrder(GetConfigString(config, "dateFallbackOrder", ""));
-    config["dateFallback5Text"] = GetConfigString(config, "dateFallback5Text", "");
-    string missingMode = (GetConfigString(config, "dateMissingMode", "empty") ?? "").Trim().ToLowerInvariant();
-    config["dateMissingMode"] = missingMode == "custom" ? "custom" : "empty";
-    config["dateMissingText"] = GetConfigString(config, "dateMissingText", "");
+    string oldFallback5 = GetConfigString(config, "dateFallback5Text", "");
+    string rawOrder = GetConfigString(config, "dateFallbackOrder", "");
+    if (rawOrder == null || rawOrder.Trim().Length == 0)
+    {
+        rawOrder = "filename,exif,modified,created";
+        rawOrder += "," + (oldFallback5.Length > 0 ? "custom" : "empty");
+    }
+    else if (rawOrder.Split(',').Length == 4 && oldFallback5.Length > 0)
+    {
+        rawOrder += ",custom";
+    }
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(rawOrder);
+    string customText = GetConfigString(config, "dateFallbackCustomText", oldFallback5);
+    config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
@@ -1122,16 +1241,15 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.03";
+    preset["presetVersion"] = "0.04";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
+    preset["filterExtensions"] = normalized["filterExtensions"];
+    preset["filterMode"] = normalized["filterMode"];
     preset["dateSource"] = normalized["dateSource"];
-    preset["dateFallbackEnabled"] = normalized["dateFallbackEnabled"];
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
-    preset["dateFallback5Text"] = normalized["dateFallback5Text"];
-    preset["dateMissingMode"] = normalized["dateMissingMode"];
-    preset["dateMissingText"] = normalized["dateMissingText"];
+    preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
     preset["realTimePreview"] = normalized["realTimePreview"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
@@ -1148,9 +1266,10 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
     bool applied = false;
     string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear", "dateSource",
-        "dateFallbackEnabled", "dateFallbackOrder", "dateFallback5Text",
-        "dateMissingMode", "dateMissingText",
+        "rootMode", "rootPath", "startYear",
+        "filterExtensions", "filterMode",
+        "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
+        "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
         "checksumPrefix", "checksumSuffix", "template"
     };
@@ -1169,7 +1288,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.03
+// 版本：0.04
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -1177,6 +1296,7 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
 private static Window _window;
 private static IDictionary<string, object> _data;
+private static ICustomWindowContext _winContext;
 private static DataGrid _grid;
 private static RichTextBox _editor;
 private static TextBox _rootPathText;
@@ -1194,14 +1314,16 @@ private static Button _browseRootButton;
 private static Button _applyButton;
 private static Button _previewButton;
 private static CheckBox _realTimeCheck;
-private static CheckBox _fallbackEnabledCheck;
+private static TextBox _filterExtensionsText;
+private static ComboBox _filterModeCombo;
+private static Button _loadExtPresetButton;
+private static Button _saveExtPresetButton;
 private static ComboBox _fallback1Combo;
 private static ComboBox _fallback2Combo;
 private static ComboBox _fallback3Combo;
 private static ComboBox _fallback4Combo;
-private static TextBox _fallback5Text;
-private static ComboBox _missingModeCombo;
-private static TextBox _missingText;
+private static ComboBox _fallback5Combo;
+private static TextBox _fallbackCustomText;
 private static Border _errorBanner;
 private static TextBlock _errorBannerText;
 private static Popup _presetPopup;
@@ -1250,6 +1372,7 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
 {
     _window = win;
     _data = dataContext;
+    _winContext = winContext;
 
     if (dataContext != null)
     {
@@ -1257,6 +1380,8 @@ public static void OnWindowCreated(Window win, IDictionary<string, object> dataC
             dataContext["files"] = new List<object>();
         if (!dataContext.ContainsKey("preset") || dataContext["preset"] == null)
             dataContext["preset"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        if (!dataContext.ContainsKey("extensionPresets") || dataContext["extensionPresets"] == null)
+            dataContext["extensionPresets"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         object startYearValue;
         if (!dataContext.TryGetValue("startYear", out startYearValue) || startYearValue == null)
             dataContext["startYear"] = 2000;
@@ -1272,6 +1397,7 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
 {
     _window = win;
     _data = dataContext;
+    _winContext = winContext;
 
     FindControls(win);
     ResetRuntimeState();
@@ -1321,14 +1447,16 @@ private static void FindControls(Window win)
     _applyButton = (Button)win.FindName("BtnApply");
     _previewButton = (Button)win.FindName("BtnPreview");
     _realTimeCheck = (CheckBox)win.FindName("RealTimeCheck");
-    _fallbackEnabledCheck = (CheckBox)win.FindName("FallbackEnabledCheck");
+    _filterExtensionsText = (TextBox)win.FindName("FilterExtensionsText");
+    _filterModeCombo = (ComboBox)win.FindName("FilterModeCombo");
+    _loadExtPresetButton = (Button)win.FindName("BtnLoadExtPreset");
+    _saveExtPresetButton = (Button)win.FindName("BtnSaveExtPreset");
     _fallback1Combo = (ComboBox)win.FindName("Fallback1Combo");
     _fallback2Combo = (ComboBox)win.FindName("Fallback2Combo");
     _fallback3Combo = (ComboBox)win.FindName("Fallback3Combo");
     _fallback4Combo = (ComboBox)win.FindName("Fallback4Combo");
-    _fallback5Text = (TextBox)win.FindName("Fallback5Text");
-    _missingModeCombo = (ComboBox)win.FindName("MissingModeCombo");
-    _missingText = (TextBox)win.FindName("MissingText");
+    _fallback5Combo = (ComboBox)win.FindName("Fallback5Combo");
+    _fallbackCustomText = (TextBox)win.FindName("FallbackCustomText");
     _errorBanner = (Border)win.FindName("ErrorBanner");
     _errorBannerText = (TextBlock)win.FindName("ErrorBannerText");
     _presetPopup = (Popup)win.FindName("PresetPopup");
@@ -1398,15 +1526,14 @@ private static void AttachEvents(Window win)
     _algorithmCombo.SelectionChanged += AlgorithmCombo_SelectionChanged;
     _realTimeCheck.Checked += RealTimeCheck_Changed;
     _realTimeCheck.Unchecked += RealTimeCheck_Changed;
-    _fallbackEnabledCheck.Checked += FallbackEnabledCheck_Changed;
-    _fallbackEnabledCheck.Unchecked += FallbackEnabledCheck_Changed;
+    _filterExtensionsText.TextChanged += FilterExtensions_TextChanged;
+    _filterModeCombo.SelectionChanged += FilterMode_SelectionChanged;
     _fallback1Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallback2Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallback3Combo.SelectionChanged += FallbackOrder_SelectionChanged;
     _fallback4Combo.SelectionChanged += FallbackOrder_SelectionChanged;
-    _missingModeCombo.SelectionChanged += MissingModeCombo_SelectionChanged;
-    _missingText.TextChanged += MissingText_TextChanged;
-    _fallback5Text.TextChanged += Fallback5Text_TextChanged;
+    _fallback5Combo.SelectionChanged += FallbackOrder_SelectionChanged;
+    _fallbackCustomText.TextChanged += FallbackCustomText_TextChanged;
     if (_presetListBox != null)
         _presetListBox.SelectionChanged += PresetListBox_SelectionChanged;
     _digitsText.TextChanged += DigitsText_TextChanged;
@@ -1427,6 +1554,8 @@ private static void AttachEvents(Window win)
     AttachClick("BtnResetTemplate", ResetTemplate_Click);
     AttachClick("BtnLoadPreset", LoadPreset_Click);
     AttachClick("BtnSavePreset", SavePreset_Click);
+    AttachClick("BtnLoadExtPreset", LoadExtPreset_Click);
+    AttachClick("BtnSaveExtPreset", SaveExtPreset_Click);
     AttachClick("BtnPreview", Preview_Click);
     AttachClick("BtnCancel", Cancel_Click);
     AttachClick("BtnApply", Apply_Click);
@@ -1448,15 +1577,22 @@ private static void AttachToolTips()
     SetTip(_rootPathText, "当前根路径的显示结果，只读。\n当前文件夹模式下显示占位说明；其他文件夹模式下显示已选择目录。");
     SetTip(_browseRootButton, "选择固定根目录。\n选择“其他文件夹”时也会自动弹出此选择器；取消且没有历史目录时会回到“当前文件夹”。");
     SetTip(_startYearCombo, "文件名日期允许的最早起始年份，默认2000。\n修改后会重新提取所有文件的【文件名中的日期】，并刷新目标路径预览。");
-    SetTip(_dateSourceCombo, "主选日期来源，默认“文件名中的日期”。\n该日期用于【日期yyyy】【日期mm】【日期dd】。\n主选缺失时：开启递补则按递补顺序查找；关闭递补则使用“递补关闭时缺失值”。");
-    SetTip(_fallbackEnabledCheck, "是否启用日期缺失递补。\n开启：主选缺失时按递补1→4查找第一个可用日期；仍未找到时使用递补5兜底。\n关闭：主选缺失时直接使用“递补关闭时缺失值”，不再尝试其他日期。");
-    SetTip(_fallback1Combo, "递补顺序第1项：日期来源。\n按顺序查找第一个可用日期。");
-    SetTip(_fallback2Combo, "递补顺序第2项：日期来源。\n前一项缺失时才会使用。");
-    SetTip(_fallback3Combo, "递补顺序第3项：日期来源。\n前两项缺失时才会使用。");
-    SetTip(_fallback4Combo, "递补顺序第4项：日期来源。\n前三项缺失时才会使用。");
-    SetTip(_fallback5Text, "递补5：最终兜底值。\n默认空字符串；留空表示空值，此时【日期yyyy】【日期mm】【日期dd】全部为空。\n也可输入自定义字符串，三个日期胶囊都会使用该字符串。\n后果：为空且默认模板包含日期层级时，可能形成非法路径并在顶部报错。");
-    SetTip(_missingModeCombo, "关闭缺失递补时使用。\n空值：日期胶囊全部为空。\n自定义字符串：使用右侧文本替换【日期yyyy】【日期mm】【日期dd】。");
-    SetTip(_missingText, "关闭缺失递补时的自定义缺失字符串。\n该文本会同时替换三个日期胶囊；为空时三个日期胶囊为空。");
+    SetTip(_dateSourceCombo, "主选日期来源，默认“文件名中的日期”。\n该日期用于【日期yyyy】【日期mm】【日期dd】。\n主选缺失时按递补1→5依次处理。");
+    SetTip(_filterExtensionsText, "过滤器扩展名列表。\n支持分号、逗号、空格、换行分隔；可写 jpg 或 .jpg。\n空列表表示不过滤。\n匹配后由“决策模式”决定跳过还是执行；被跳过的文件不输出。");
+    SetTip(_filterModeCombo, "过滤器决策模式。\n匹配时跳过：命中扩展名的文件不处理、不输出。\n匹配时执行（白名单）：仅处理命中扩展名的文件，其他文件跳过。");
+    SetTip(_loadExtPresetButton, "从动作词典【扩展名预设】载入扩展名列表。\n选择预设后可覆盖当前列表或追加到当前列表。");
+    SetTip(_saveExtPresetButton, "把当前扩展名列表保存到动作词典【扩展名预设】。\n会要求输入预设名称；同名时确认覆盖。");
+    SetTip(_fallback1Combo, "递补1：日期来源/空值/自定义/跳过。\n按顺序查找；日期来源可用则采用。\n空值=日期胶囊为空；自定义=使用自定义值；跳过=该文件不处理也不输出。");
+    SetTip(_fallback2Combo, "递补2：前一项未取到日期时处理。\n可选项：文件名日期、EXIF、修改、创建、空值、自定义、跳过。");
+    SetTip(_fallback3Combo, "递补3：前面各项都未取到日期时处理。\n空值/自定义/跳过会立即结束查找。");
+    SetTip(_fallback4Combo, "递补4：前面各项都未取到日期时处理。\n空值/自定义/跳过会立即结束查找。");
+    SetTip(_fallback5Combo, "递补5：最终兜底。默认“空值”。\n空值下【日期yyyy】【日期mm】【日期dd】全部为空。\n选择“跳过”则命中此兜底的文件不处理、不输出。");
+    SetTip(_fallbackCustomText, "任一递补选择“自定义”时使用的文本。\n该文本会同时替换三个日期胶囊；为空时视为空值。\n后果：为空且默认模板包含日期层级时可能形成非法路径并报错。");
+    SetTipByName("FilterCardTitle", "过滤器：按扩展名筛选文件。\n决策模式支持“匹配时跳过”或“匹配时执行”。\n扩展名列表可保存/载入到动作词典【扩展名预设】；载入可选择覆盖或追加。\n被跳过的文件不参与目标计算、不输出。");
+    SetTipByName("RootCardTitle", "根路径：决定目标路径的根目录。\n当前文件夹=每个源文件所在目录；其他文件夹=统一目录。\n后果：统一目录可能让不同来源的同名文件产生重名。");
+    SetTipByName("DateCardTitle", "日期：选择主日期来源，并配置递补1→5。\n递补可依次尝试其他日期、空值、自定义字符串；选择跳过时该文件不处理、不输出。\n空值下三个日期胶囊都为空。");
+    SetTipByName("ChecksumCardTitle", "校验码：算法、位数、前后缀。\n位数取高位；默认前缀[、后缀]；模板不含【校验码】时不计算哈希。\n大文件/BLAKE3计算需要时间。");
+    SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
     SetTip(_realTimeCheck, "实时刷新开关。\n开启：配置变更后立即重算目标路径（文本输入约250ms防抖）。\n关闭：配置变更只更新配置/日期数据，目标路径保持旧值；需点击【预览】刷新，预览过期时【生成输出】禁用。");
     SetTip(_previewButton, "按当前配置重新计算目标路径，并启动必要的校验码计算。\n用于实时刷新关闭后的手动刷新，也可主动重新预览。");
     SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n若词典是旧版单预设，会显示为“默认”。");
@@ -1527,11 +1663,10 @@ private static void SyncUiFromConfig()
     SelectComboByTag(_dateSourceCombo, _config["dateSource"]);
     SelectComboByTag(_algorithmCombo, _config["checksumAlgorithm"]);
     _realTimeCheck.IsChecked = GetConfigBool(_config, "realTimePreview", true);
-    _fallbackEnabledCheck.IsChecked = GetConfigBool(_config, "dateFallbackEnabled", true);
+    _filterExtensionsText.Text = _config["filterExtensions"];
+    SelectComboByTag(_filterModeCombo, _config["filterMode"]);
     SyncFallbackCombosFromConfig();
-    SelectComboByTag(_missingModeCombo, _config["dateMissingMode"]);
-    _missingText.Text = _config["dateMissingText"];
-    _fallback5Text.Text = _config["dateFallback5Text"];
+    _fallbackCustomText.Text = _config["dateFallbackCustomText"];
     _digitsText.Text = _config["checksumDigits"];
     _prefixText.Text = _config["checksumPrefix"];
     _suffixText.Text = _config["checksumSuffix"];
@@ -1583,7 +1718,8 @@ private static string GetFallbackOrderFromUi()
 {
     string[] tags = new string[] {
         GetComboTag(_fallback1Combo), GetComboTag(_fallback2Combo),
-        GetComboTag(_fallback3Combo), GetComboTag(_fallback4Combo)
+        GetComboTag(_fallback3Combo), GetComboTag(_fallback4Combo),
+        GetComboTag(_fallback5Combo)
     };
     StringBuilder builder = new StringBuilder();
     for (int i = 0; i < tags.Length; i++)
@@ -1605,20 +1741,17 @@ private static void SyncFallbackCombosFromConfig()
     SelectComboByTag(_fallback2Combo, parts.Length > 1 ? parts[1] : "exif");
     SelectComboByTag(_fallback3Combo, parts.Length > 2 ? parts[2] : "modified");
     SelectComboByTag(_fallback4Combo, parts.Length > 3 ? parts[3] : "created");
+    SelectComboByTag(_fallback5Combo, parts.Length > 4 ? parts[4] : "empty");
 }
 
 private static void UpdateFallbackUiState()
 {
-    bool fallback = GetConfigBool(_config, "dateFallbackEnabled", true);
-    _fallback1Combo.IsEnabled = fallback;
-    _fallback2Combo.IsEnabled = fallback;
-    _fallback3Combo.IsEnabled = fallback;
-    _fallback4Combo.IsEnabled = fallback;
-    _fallback5Text.IsEnabled = fallback;
-
-    _missingModeCombo.IsEnabled = !fallback;
-    bool custom = GetComboTag(_missingModeCombo) == "custom";
-    _missingText.IsEnabled = !fallback && custom;
+    bool custom = GetComboTag(_fallback1Combo) == "custom" ||
+        GetComboTag(_fallback2Combo) == "custom" ||
+        GetComboTag(_fallback3Combo) == "custom" ||
+        GetComboTag(_fallback4Combo) == "custom" ||
+        GetComboTag(_fallback5Combo) == "custom";
+    _fallbackCustomText.IsEnabled = custom;
 }
 
 private static void UpdateRealTimeUi()
@@ -1640,12 +1773,11 @@ private static void ReadConfigFromUi()
             NumberStyles.Integer, CultureInfo.InvariantCulture, out year);
     _config["startYear"] = year.ToString(CultureInfo.InvariantCulture);
 
+    _config["filterExtensions"] = _filterExtensionsText.Text == null ? "" : _filterExtensionsText.Text;
+    _config["filterMode"] = GetComboTag(_filterModeCombo) ?? "skip";
     _config["dateSource"] = GetComboTag(_dateSourceCombo) ?? "filename";
-    _config["dateFallbackEnabled"] = _fallbackEnabledCheck.IsChecked == true ? "true" : "false";
     _config["dateFallbackOrder"] = GetFallbackOrderFromUi();
-    _config["dateFallback5Text"] = _fallback5Text.Text == null ? "" : _fallback5Text.Text;
-    _config["dateMissingMode"] = GetComboTag(_missingModeCombo) ?? "empty";
-    _config["dateMissingText"] = _missingText.Text == null ? "" : _missingText.Text;
+    _config["dateFallbackCustomText"] = _fallbackCustomText.Text == null ? "" : _fallbackCustomText.Text;
     _config["realTimePreview"] = _realTimeCheck.IsChecked == true ? "true" : "false";
     _config["checksumAlgorithm"] = GetComboTag(_algorithmCombo) ?? "CRC32";
     _config["checksumDigits"] = _digitsText.Text == null ? "" : _digitsText.Text.Trim();
@@ -1740,7 +1872,13 @@ private static void RealTimeCheck_Changed(object sender, RoutedEventArgs e)
     ApplyUiConfig();
 }
 
-private static void FallbackEnabledCheck_Changed(object sender, RoutedEventArgs e)
+private static void FilterExtensions_TextChanged(object sender, TextChangedEventArgs e)
+{
+    if (_suppressEvents) return;
+    ScheduleApply();
+}
+
+private static void FilterMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
 {
     if (_suppressEvents) return;
     ApplyUiConfig();
@@ -1752,19 +1890,7 @@ private static void FallbackOrder_SelectionChanged(object sender, SelectionChang
     ApplyUiConfig();
 }
 
-private static void MissingModeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
-{
-    if (_suppressEvents) return;
-    ApplyUiConfig();
-}
-
-private static void MissingText_TextChanged(object sender, TextChangedEventArgs e)
-{
-    if (_suppressEvents) return;
-    ScheduleApply();
-}
-
-private static void Fallback5Text_TextChanged(object sender, TextChangedEventArgs e)
+private static void FallbackCustomText_TextChanged(object sender, TextChangedEventArgs e)
 {
     if (_suppressEvents) return;
     ScheduleApply();
@@ -1831,8 +1957,8 @@ private static void ApplyUiConfig()
 
     string oldStartYear = GetConfigString(_config, "startYear", "2000");
     string oldDateSource = GetConfigString(_config, "dateSource", "filename");
-    string oldFallbackEnabled = GetConfigString(_config, "dateFallbackEnabled", "true");
     string oldFallbackOrder = GetConfigString(_config, "dateFallbackOrder", "");
+    string oldFallbackCustom = GetConfigString(_config, "dateFallbackCustomText", "");
     string oldRealTime = GetConfigString(_config, "realTimePreview", "true");
     string oldAlgorithm = GetConfigString(_config, "checksumAlgorithm", "CRC32");
     int oldDigits = GetConfigInt(_config, "checksumDigits", 8);
@@ -1878,8 +2004,8 @@ private static void ApplyUiConfig()
     bool realTimeChanged = (oldRealTime != _config["realTimePreview"]);
     bool startChanged = (oldStartYear != _config["startYear"]);
     bool dateChanged = (oldDateSource != _config["dateSource"]);
-    bool fallbackChanged = (oldFallbackEnabled != _config["dateFallbackEnabled"] ||
-        NormalizeFallbackOrder(oldFallbackOrder) != _config["dateFallbackOrder"]);
+    bool fallbackChanged = (NormalizeFallbackOrder(oldFallbackOrder) != _config["dateFallbackOrder"] ||
+        oldFallbackCustom != _config["dateFallbackCustomText"]);
 
     if (realTimeChanged && realTime)
     {
@@ -1974,12 +2100,17 @@ private static void UpdateEffectiveDate(Dictionary<string, object> item)
 
     DateTime? effectiveDate;
     string effectiveSource;
-    bool resolved = TryResolveEffectiveDate(dates, _config["dateSource"],
-        GetConfigBool(_config, "dateFallbackEnabled", true),
-        _config["dateFallbackOrder"], out effectiveDate, out effectiveSource);
+    string missingText;
+    bool skipped;
+    ResolveDateValue(dates, _config["dateSource"], _config["dateFallbackOrder"],
+        _config["dateFallbackCustomText"], out effectiveDate, out effectiveSource,
+        out missingText, out skipped);
 
     item["EffectiveDate"] = effectiveDate;
-    item["EffectiveSource"] = resolved ? effectiveSource : "";
+    item["EffectiveSource"] = effectiveSource == null ? "" : effectiveSource;
+    item["MissingDateText"] = missingText == null ? "" : missingText;
+    item["DateSkipped"] = skipped;
+    item["IsSkipped"] = skipped || GetBool(item, "FilterSkipped");
 }
 
 private static DateTime? GetDate(Dictionary<string, object> item, string key)
@@ -2171,6 +2302,10 @@ private static Dictionary<string, object> BuildFileItem(string path)
         item["FileNameDate"] = null;
         item["EffectiveDate"] = null;
         item["EffectiveSource"] = "";
+        item["MissingDateText"] = "";
+        item["DateSkipped"] = false;
+        item["FilterSkipped"] = false;
+        item["IsSkipped"] = false;
         item["HashHex"] = null;
         item["HashPending"] = false;
         item["TargetPath"] = "";
@@ -2334,6 +2469,8 @@ private static void EnsureHashWorker()
     List<string> missing = new List<string>();
     for (int i = 0; i < _files.Count; i++)
     {
+        if (GetBool(_files[i], "IsSkipped"))
+            continue;
         string path = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
         if (!IsHashCached(path, algorithm))
             missing.Add(path);
@@ -2486,9 +2623,6 @@ private static void RecomputeAll()
     string customRoot = _config["rootPath"];
     bool customRootMissing = (rootMode == "custom" &&
         (customRoot == null || customRoot.Trim().Length == 0));
-    string missingDateText = GetConfigBool(_config, "dateFallbackEnabled", true)
-        ? _config["dateFallback5Text"]
-        : (_config["dateMissingMode"] == "custom" ? _config["dateMissingText"] : "");
 
     // 第一遍：计算每个文件的目标路径。
     for (int i = 0; i < _files.Count; i++)
@@ -2501,6 +2635,17 @@ private static void RecomputeAll()
         item["TargetPath"] = "";
         item["HashHex"] = null;
         item["HashPending"] = false;
+        item["FilterSkipped"] = false;
+
+        string itemExtension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
+        bool filterSkip = ShouldSkipByFilter(itemExtension, _config["filterExtensions"], _config["filterMode"]);
+        item["FilterSkipped"] = filterSkip;
+        item["IsSkipped"] = filterSkip || GetBool(item, "DateSkipped");
+        if (GetBool(item, "IsSkipped"))
+        {
+            item["Status"] = filterSkip ? "过滤跳过" : "日期跳过";
+            continue;
+        }
 
         if (!templateValid)
         {
@@ -2550,6 +2695,7 @@ private static void RecomputeAll()
 
         string baseName = Convert.ToString(item["BaseName"], CultureInfo.InvariantCulture);
         string extension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
+        string missingDateText = Convert.ToString(item["MissingDateText"], CultureInfo.InvariantCulture);
         string target;
         string error;
         bool ok = TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
@@ -2580,7 +2726,7 @@ private static void RecomputeAll()
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
-        if (GetBool(item, "HasError") || GetBool(item, "IsPending"))
+        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
             continue;
         string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
         if (target == null || target.Length == 0)
@@ -2605,7 +2751,7 @@ private static void RecomputeAll()
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
-        if (GetBool(item, "HasError") || GetBool(item, "IsPending"))
+        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
             continue;
 
         string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
@@ -2689,11 +2835,8 @@ private static string BuildDetails(Dictionary<string, object> item)
         "（来源：" + GetDateSourceName(Convert.ToString(item["EffectiveSource"], CultureInfo.InvariantCulture)) + "）");
     if (!GetDate(item, "EffectiveDate").HasValue)
     {
-        string replacement = GetConfigBool(_config, "dateFallbackEnabled", true)
-            ? (_config["dateFallback5Text"] == null ? "" : _config["dateFallback5Text"])
-            : (_config["dateMissingMode"] == "custom"
-                ? (_config["dateMissingText"] == null ? "" : _config["dateMissingText"]) : "");
-        builder.AppendLine("日期缺失替换值：" + (replacement.Length == 0 ? "（空字符串）" : replacement));
+        string replacement = Convert.ToString(item["MissingDateText"], CultureInfo.InvariantCulture);
+        builder.AppendLine("日期缺失替换值：" + (replacement == null || replacement.Length == 0 ? "（空值）" : replacement));
     }
     builder.AppendLine("扩展名：" + Convert.ToString(item["Ext"], CultureInfo.InvariantCulture));
 
@@ -2727,6 +2870,9 @@ private static string GetDateSourceName(string source)
     if (source == "exif") return "EXIF拍摄日期";
     if (source == "modified") return "修改日期";
     if (source == "created") return "创建日期";
+    if (source == "empty") return "空值";
+    if (source == "custom") return "自定义值";
+    if (source == "skip") return "跳过";
     return "—";
 }
 
@@ -2765,6 +2911,9 @@ private static void UpdateStatus()
 
     string text = "共 " + _files.Count + " 个文件" + DescribeSkipped();
     text += "；就绪 " + ready + "；异常 " + errors;
+    int skipped = CountSkippedRows();
+    if (skipped > 0)
+        text += "；过滤/日期跳过 " + skipped;
     if (pending > 0)
         text += "；校验码计算中 " + pending;
     if (TemplateContainsToken(_config["template"], "【校验码】") && _hashTotal > 0 &&
@@ -2811,7 +2960,7 @@ private static void RefreshErrorBanner(string globalError)
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
-        if (!GetBool(item, "HasError"))
+        if (!GetBool(item, "HasError") || GetBool(item, "IsSkipped"))
             continue;
         errorRows++;
         string message = Convert.ToString(item["Error"], CultureInfo.InvariantCulture);
@@ -2869,6 +3018,17 @@ private static int CountPendingRows()
     int pending;
     CountRows(out ready, out errors, out pending);
     return pending;
+}
+
+private static int CountSkippedRows()
+{
+    int count = 0;
+    for (int i = 0; i < _files.Count; i++)
+    {
+        if (GetBool(_files[i], "IsSkipped"))
+            count++;
+    }
+    return count;
 }
 
 private static void CountRows(out int ready, out int errors, out int pending)
@@ -3110,6 +3270,174 @@ private static void SavePreset_Click(object sender, RoutedEventArgs e)
     _statusText.Text = "已保存预设：" + name;
 }
 
+private static void LoadExtPreset_Click(object sender, RoutedEventArgs e)
+{
+    Dictionary<string, string> store = LoadExtensionPresetStore();
+    if (store.Count == 0)
+    {
+        MessageBox.Show("当前没有已保存的扩展名预设。", "载入扩展名预设",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    List<string> names = new List<string>(store.Keys);
+    names.Sort(StringComparer.OrdinalIgnoreCase);
+
+    ContextMenu menu = new ContextMenu();
+    for (int i = 0; i < names.Count; i++)
+    {
+        MenuItem item = new MenuItem();
+        item.Header = names[i];
+        item.Tag = names[i];
+        item.Click += ExtPresetItem_Click;
+        menu.Items.Add(item);
+    }
+    menu.PlacementTarget = _loadExtPresetButton;
+    menu.Placement = PlacementMode.Bottom;
+    menu.IsOpen = true;
+}
+
+private static void ExtPresetItem_Click(object sender, RoutedEventArgs e)
+{
+    MenuItem item = sender as MenuItem;
+    if (item == null || item.Tag == null)
+        return;
+    LoadExtensionPreset(Convert.ToString(item.Tag, CultureInfo.InvariantCulture));
+}
+
+private static void LoadExtensionPreset(string name)
+{
+    Dictionary<string, string> store = LoadExtensionPresetStore();
+    string actualName = FindExtensionPresetKey(store, name);
+    if (actualName == null)
+        return;
+
+    DialogResult answer = MessageBox.Show(
+        "载入扩展名预设“" + actualName + "”。\n\n是：覆盖现有扩展名列表\n否：追加到现有列表\n取消：放弃载入",
+        "载入扩展名预设", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+    if (answer == DialogResult.Cancel)
+        return;
+
+    string value = store[actualName];
+    if (answer == DialogResult.Yes)
+        _filterExtensionsText.Text = value;
+    else
+        _filterExtensionsText.Text = NormalizeExtensionList(
+            (_filterExtensionsText.Text == null ? "" : _filterExtensionsText.Text) + ";" + value);
+
+    if (_debounceTimer != null)
+        _debounceTimer.Stop();
+    ApplyUiConfig();
+    _statusText.Text = "已" + (answer == DialogResult.Yes ? "覆盖载入" : "追加载入") +
+        "扩展名预设：" + actualName;
+}
+
+private static void SaveExtPreset_Click(object sender, RoutedEventArgs e)
+{
+    string list = NormalizeExtensionList(_filterExtensionsText.Text);
+    if (list.Length == 0)
+    {
+        MessageBox.Show("扩展名列表为空，无法保存。", "保存扩展名预设",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        return;
+    }
+
+    string name = PromptForPresetName("");
+    if (name == null)
+        return;
+    name = name.Trim();
+    if (name.Length == 0)
+        return;
+
+    Dictionary<string, string> store = LoadExtensionPresetStore();
+    string existingName = FindExtensionPresetKey(store, name);
+    if (existingName != null)
+    {
+        DialogResult answer = MessageBox.Show(
+            "扩展名预设“" + existingName + "”已存在。\n\n旧值：" + store[existingName] +
+            "\n新值：" + list + "\n\n是否覆盖？",
+            "保存扩展名预设", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes)
+            return;
+        store[existingName] = list;
+        name = existingName;
+    }
+    else
+    {
+        store[name] = list;
+    }
+
+    SaveExtensionPresetStore(store);
+    _statusText.Text = "已保存扩展名预设：" + name;
+}
+
+private static Dictionary<string, string> LoadExtensionPresetStore()
+{
+    Dictionary<string, string> store =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    if (_data == null)
+        return store;
+
+    object presetObject;
+    if (!_data.TryGetValue("extensionPresets", out presetObject) || presetObject == null)
+        return store;
+
+    IDictionary<string, object> root = AsObjectDictionary(presetObject);
+    if (root == null)
+        return store;
+
+    object presetsObject;
+    if (root.TryGetValue("presets", out presetsObject) && presetsObject != null)
+    {
+        IDictionary<string, object> presets = AsObjectDictionary(presetsObject);
+        if (presets != null)
+        {
+            foreach (KeyValuePair<string, object> pair in presets)
+            {
+                if (pair.Value != null)
+                    store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
+            }
+        }
+        return store;
+    }
+
+    foreach (KeyValuePair<string, object> pair in root)
+    {
+        if (pair.Key == "presetVersion" || pair.Value == null)
+            continue;
+        if (pair.Value is string || pair.Value is IConvertible)
+            store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
+    }
+    return store;
+}
+
+private static void SaveExtensionPresetStore(Dictionary<string, string> store)
+{
+    if (_data == null)
+        return;
+
+    Dictionary<string, object> root =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    root["presetVersion"] = "0.04";
+    Dictionary<string, object> presets =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    foreach (KeyValuePair<string, string> pair in store)
+        presets[pair.Key] = pair.Value;
+    root["presets"] = presets;
+    _data["extensionPresets"] = root;
+    PublishActionVariable("扩展名预设", root);
+}
+
+private static string FindExtensionPresetKey(Dictionary<string, string> store, string name)
+{
+    foreach (string key in store.Keys)
+    {
+        if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+            return key;
+    }
+    return null;
+}
+
 private static Dictionary<string, Dictionary<string, object>> LoadPresetStore()
 {
     Dictionary<string, Dictionary<string, object>> store =
@@ -3155,7 +3483,7 @@ private static void SavePresetStore(Dictionary<string, Dictionary<string, object
 
     Dictionary<string, object> root =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    root["presetVersion"] = "0.03";
+    root["presetVersion"] = "0.04";
 
     Dictionary<string, object> presets =
         new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
@@ -3163,6 +3491,56 @@ private static void SavePresetStore(Dictionary<string, Dictionary<string, object
         presets[pair.Key] = pair.Value;
     root["presets"] = presets;
     _data["preset"] = root;
+
+    // 尽量实时同步到动作变量；若当前Quicker版本未暴露Context，则仍会在窗口关闭时写回。
+    PublishActionVariable("批量重命名器预设", root);
+}
+
+private static void PublishActionVariable(string variableName, object value)
+{
+    if (_winContext == null || variableName == null)
+        return;
+    try
+    {
+        // 不同版本可能直接提供 SetVarValue，或通过 Context / GetRootContext 暴露。
+        object target = _winContext;
+        if (!TrySetVarValue(target, variableName, value))
+        {
+            PropertyInfo contextProperty = target.GetType().GetProperty("Context");
+            if (contextProperty != null)
+            {
+                object context = contextProperty.GetValue(target, null);
+                if (context != null && TrySetVarValue(context, variableName, value))
+                    return;
+
+                if (context != null)
+                {
+                    MethodInfo rootMethod = context.GetType().GetMethod("GetRootContext", Type.EmptyTypes);
+                    if (rootMethod != null)
+                    {
+                        object root = rootMethod.Invoke(context, null);
+                        TrySetVarValue(root, variableName, value);
+                    }
+                }
+            }
+        }
+    }
+    catch
+    {
+        // 实时写变量失败不影响窗口内保存结果，关闭时由数据映射写回。
+    }
+}
+
+private static bool TrySetVarValue(object target, string variableName, object value)
+{
+    if (target == null)
+        return false;
+    MethodInfo method = target.GetType().GetMethod("SetVarValue",
+        new Type[] { typeof(string), typeof(object) });
+    if (method == null)
+        return false;
+    method.Invoke(target, new object[] { variableName, value });
+    return true;
 }
 
 private static IDictionary<string, object> AsObjectDictionary(object value)
@@ -3214,11 +3592,11 @@ private static string BuildPresetDiff(Dictionary<string, string> oldConfig,
     Dictionary<string, string> newConfig)
 {
     string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear", "dateSource",
-        "dateFallbackEnabled", "dateFallbackOrder", "dateFallback5Text",
-        "dateMissingMode", "dateMissingText", "realTimePreview",
-        "checksumAlgorithm", "checksumDigits", "checksumPrefix",
-        "checksumSuffix", "template"
+        "rootMode", "rootPath", "startYear",
+        "filterExtensions", "filterMode",
+        "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
+        "realTimePreview", "checksumAlgorithm", "checksumDigits",
+        "checksumPrefix", "checksumSuffix", "template"
     };
 
     StringBuilder builder = new StringBuilder();
@@ -3240,12 +3618,11 @@ private static string GetConfigLabel(string key)
     if (key == "rootMode") return "根路径模式";
     if (key == "rootPath") return "根路径";
     if (key == "startYear") return "最早起始年份";
+    if (key == "filterExtensions") return "过滤器扩展名";
+    if (key == "filterMode") return "过滤器决策模式";
     if (key == "dateSource") return "日期来源";
-    if (key == "dateFallbackEnabled") return "启用缺失递补";
     if (key == "dateFallbackOrder") return "递补顺序";
-    if (key == "dateFallback5Text") return "递补5兜底值";
-    if (key == "dateMissingMode") return "缺失值模式";
-    if (key == "dateMissingText") return "缺失值";
+    if (key == "dateFallbackCustomText") return "递补自定义值";
     if (key == "realTimePreview") return "实时刷新";
     if (key == "checksumAlgorithm") return "校验算法";
     if (key == "checksumDigits") return "校验位数";
@@ -3263,10 +3640,10 @@ private static string FormatPresetValue(string key, string value)
         return value == "custom" ? "其他文件夹" : "当前文件夹";
     if (key == "dateSource")
         return GetDateSourceName(value);
-    if (key == "dateFallbackEnabled" || key == "realTimePreview")
+    if (key == "filterMode")
+        return value == "execute" ? "匹配时执行（白名单）" : "匹配时跳过";
+    if (key == "realTimePreview")
         return value == "true" ? "开启" : "关闭";
-    if (key == "dateMissingMode")
-        return value == "custom" ? "自定义字符串" : "空值";
     if (key == "dateFallbackOrder")
         return FormatDateOrder(value);
     if (value.Length == 0)
@@ -3421,7 +3798,7 @@ private static void Apply_Click(object sender, RoutedEventArgs e)
     for (int i = 0; i < _files.Count; i++)
     {
         Dictionary<string, object> item = _files[i];
-        if (GetBool(item, "HasError") || GetBool(item, "IsPending"))
+        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
             continue;
         string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
         if (target == null || target.Length == 0)
@@ -3691,14 +4068,16 @@ private static void Window_Closed(object sender, EventArgs e)
     _applyButton = null;
     _previewButton = null;
     _realTimeCheck = null;
-    _fallbackEnabledCheck = null;
+    _filterExtensionsText = null;
+    _filterModeCombo = null;
+    _loadExtPresetButton = null;
+    _saveExtPresetButton = null;
     _fallback1Combo = null;
     _fallback2Combo = null;
     _fallback3Combo = null;
     _fallback4Combo = null;
-    _fallback5Text = null;
-    _missingModeCombo = null;
-    _missingText = null;
+    _fallback5Combo = null;
+    _fallbackCustomText = null;
     _errorBanner = null;
     _errorBannerText = null;
     _presetPopup = null;

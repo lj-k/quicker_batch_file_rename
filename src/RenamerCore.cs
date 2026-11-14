@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.03
+// 版本：0.04
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -100,64 +100,172 @@ public static string NormalizeDateSource(string source)
 
 public static string NormalizeFallbackOrder(string order)
 {
-    List<string> result = new List<string>();
-    if (order != null)
+    string[] defaults = new string[] { "filename", "exif", "modified", "created", "empty" };
+    string[] parts = order == null ? new string[0] : order.Split(',');
+    string[] result = new string[5];
+    for (int i = 0; i < result.Length; i++)
     {
-        string[] parts = order.Split(',');
-        for (int i = 0; i < parts.Length; i++)
-        {
-            string part = parts[i] == null ? "" : parts[i].Trim();
-            if (part.Length == 0)
-                continue;
-            string normalized = NormalizeDateSource(part);
-            if (!result.Contains(normalized))
-                result.Add(normalized);
-        }
+        string token = i < parts.Length ? NormalizeFallbackToken(parts[i]) : "";
+        result[i] = token.Length == 0 ? defaults[i] : token;
     }
-    for (int i = 0; i < SupportedDateSources.Length; i++)
-    {
-        if (!result.Contains(SupportedDateSources[i]))
-            result.Add(SupportedDateSources[i]);
-    }
-    return string.Join(",", result.ToArray());
+    return string.Join(",", result);
 }
 
-public static bool TryResolveEffectiveDate(IDictionary<string, DateTime?> dates,
-    string primarySource, bool fallbackEnabled, string fallbackOrder,
-    out DateTime? effectiveDate, out string effectiveSource)
+public static string NormalizeFallbackToken(string token)
+{
+    string value = (token == null ? "" : token.Trim()).ToLowerInvariant();
+    if (value.Length == 0)
+        return "";
+    if (value == "empty" || value == "null" || value == "空" || value == "空值")
+        return "empty";
+    if (value == "custom" || value == "自定义" || value == "自定义值")
+        return "custom";
+    if (value == "skip" || value == "跳过")
+        return "skip";
+
+    string source;
+    if (TryNormalizeDateSource(value, out source))
+        return source;
+    return "";
+}
+
+private static bool TryNormalizeDateSource(string value, out string source)
+{
+    source = "";
+    string normalized = (value == null ? "" : value.Trim()).ToLowerInvariant();
+    if (normalized == "filename" || normalized == "file" || normalized == "文件名" || normalized == "文件名中的日期")
+    {
+        source = "filename";
+        return true;
+    }
+    if (normalized == "exif" || normalized == "exif拍摄日期" || normalized == "拍摄日期")
+    {
+        source = "exif";
+        return true;
+    }
+    if (normalized == "modified" || normalized == "修改" || normalized == "修改日期")
+    {
+        source = "modified";
+        return true;
+    }
+    if (normalized == "created" || normalized == "创建" || normalized == "创建日期")
+    {
+        source = "created";
+        return true;
+    }
+    return false;
+}
+
+public static void ResolveDateValue(IDictionary<string, DateTime?> dates,
+    string primarySource, string fallbackOrder, string customText,
+    out DateTime? effectiveDate, out string effectiveSource,
+    out string missingText, out bool skipped)
 {
     effectiveDate = null;
     effectiveSource = "";
+    missingText = "";
+    skipped = false;
 
-    if (dates == null)
-        return false;
-
-    string primary = NormalizeDateSource(primarySource);
-    DateTime? value;
-    if (dates.TryGetValue(primary, out value) && value.HasValue)
+    if (dates != null)
     {
-        effectiveDate = value;
-        effectiveSource = primary;
-        return true;
-    }
-
-    if (!fallbackEnabled)
-        return false;
-
-    string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
-    for (int i = 0; i < order.Length; i++)
-    {
-        string source = order[i];
-        if (source == primary)
-            continue;
-        if (dates.TryGetValue(source, out value) && value.HasValue)
+        string primary = NormalizeDateSource(primarySource);
+        DateTime? value;
+        if (dates.TryGetValue(primary, out value) && value.HasValue)
         {
             effectiveDate = value;
-            effectiveSource = source;
-            return true;
+            effectiveSource = primary;
+            return;
+        }
+
+        string[] order = NormalizeFallbackOrder(fallbackOrder).Split(',');
+        for (int i = 0; i < order.Length; i++)
+        {
+            string token = order[i];
+            if (token == "empty")
+            {
+                effectiveSource = "empty";
+                return;
+            }
+            if (token == "custom")
+            {
+                effectiveSource = "custom";
+                missingText = customText == null ? "" : customText;
+                return;
+            }
+            if (token == "skip")
+            {
+                effectiveSource = "skip";
+                skipped = true;
+                return;
+            }
+            if (dates.TryGetValue(token, out value) && value.HasValue)
+            {
+                effectiveDate = value;
+                effectiveSource = token;
+                return;
+            }
         }
     }
-    return false;
+
+    effectiveSource = "empty";
+}
+
+public static string NormalizeExtensionList(string value)
+{
+    if (value == null)
+        return "";
+    string[] parts = value.Split(new char[] { ',', ';', ' ', '\t', '\r', '\n', '|' });
+    List<string> result = new List<string>();
+    HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    for (int i = 0; i < parts.Length; i++)
+    {
+        string part = (parts[i] == null ? "" : parts[i].Trim());
+        if (part.Length == 0)
+            continue;
+        if (part == "*" || part == "*.*" || part.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            if (seen.Add("*"))
+                result.Add("*");
+            continue;
+        }
+        part = part.TrimStart('*').TrimStart('.').Trim().ToLowerInvariant();
+        if (part.Length == 0)
+            continue;
+        if (seen.Add(part))
+            result.Add(part);
+    }
+    return string.Join(";", result.ToArray());
+}
+
+public static string NormalizeFilterMode(string mode)
+{
+    string value = (mode == null ? "" : mode.Trim()).ToLowerInvariant();
+    if (value == "execute" || value == "执行" || value == "白名单" || value == "include")
+        return "execute";
+    return "skip";
+}
+
+public static bool ShouldSkipByFilter(string extension, string extensions, string mode)
+{
+    string list = NormalizeExtensionList(extensions);
+    if (list.Length == 0)
+        return false;
+
+    bool match = false;
+    string[] items = list.Split(';');
+    string normalized = (extension == null ? "" : extension.Trim().TrimStart('.')).ToLowerInvariant();
+    for (int i = 0; i < items.Length; i++)
+    {
+        if (items[i] == "*" || items[i] == normalized)
+        {
+            match = true;
+            break;
+        }
+    }
+
+    if (NormalizeFilterMode(mode) == "execute")
+        return !match;
+    return match;
 }
 
 public static string NormalizeRootMode(string mode)
@@ -999,12 +1107,11 @@ public static Dictionary<string, string> CreateDefaultConfig(int startYear)
     config["rootMode"] = "current";
     config["rootPath"] = "";
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
+    config["filterExtensions"] = "";
+    config["filterMode"] = "skip";
     config["dateSource"] = "filename";
-    config["dateFallbackEnabled"] = "true";
-    config["dateFallbackOrder"] = NormalizeFallbackOrder(null);
-    config["dateFallback5Text"] = "";
-    config["dateMissingMode"] = "empty";
-    config["dateMissingText"] = "";
+    config["dateFallbackOrder"] = "filename,exif,modified,created,empty";
+    config["dateFallbackCustomText"] = "";
     config["realTimePreview"] = "true";
     config["checksumAlgorithm"] = "CRC32";
     config["checksumDigits"] = "8";
@@ -1067,13 +1174,24 @@ public static void NormalizeConfig(Dictionary<string, string> config)
         startYear = 2000;
     config["startYear"] = NormalizeStartYear(startYear).ToString(CultureInfo.InvariantCulture);
 
+    config["filterExtensions"] = NormalizeExtensionList(GetConfigString(config, "filterExtensions", ""));
+    config["filterMode"] = NormalizeFilterMode(GetConfigString(config, "filterMode", "skip"));
+
     config["dateSource"] = NormalizeDateSource(GetConfigString(config, "dateSource", "filename"));
-    config["dateFallbackEnabled"] = GetConfigBool(config, "dateFallbackEnabled", true) ? "true" : "false";
-    config["dateFallbackOrder"] = NormalizeFallbackOrder(GetConfigString(config, "dateFallbackOrder", ""));
-    config["dateFallback5Text"] = GetConfigString(config, "dateFallback5Text", "");
-    string missingMode = (GetConfigString(config, "dateMissingMode", "empty") ?? "").Trim().ToLowerInvariant();
-    config["dateMissingMode"] = missingMode == "custom" ? "custom" : "empty";
-    config["dateMissingText"] = GetConfigString(config, "dateMissingText", "");
+    string oldFallback5 = GetConfigString(config, "dateFallback5Text", "");
+    string rawOrder = GetConfigString(config, "dateFallbackOrder", "");
+    if (rawOrder == null || rawOrder.Trim().Length == 0)
+    {
+        rawOrder = "filename,exif,modified,created";
+        rawOrder += "," + (oldFallback5.Length > 0 ? "custom" : "empty");
+    }
+    else if (rawOrder.Split(',').Length == 4 && oldFallback5.Length > 0)
+    {
+        rawOrder += ",custom";
+    }
+    config["dateFallbackOrder"] = NormalizeFallbackOrder(rawOrder);
+    string customText = GetConfigString(config, "dateFallbackCustomText", oldFallback5);
+    config["dateFallbackCustomText"] = customText == null ? "" : customText;
     config["realTimePreview"] = GetConfigBool(config, "realTimePreview", true) ? "true" : "false";
 
     string algorithm = NormalizeAlgorithm(GetConfigString(config, "checksumAlgorithm", "CRC32"));
@@ -1103,16 +1221,15 @@ public static Dictionary<string, object> BuildPresetDictionary(Dictionary<string
     Dictionary<string, string> normalized = config == null ? CreateDefaultConfig(2000) : config;
     NormalizeConfig(normalized);
     Dictionary<string, object> preset = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    preset["presetVersion"] = "0.03";
+    preset["presetVersion"] = "0.04";
     preset["rootMode"] = normalized["rootMode"];
     preset["rootPath"] = normalized["rootPath"];
     preset["startYear"] = normalized["startYear"];
+    preset["filterExtensions"] = normalized["filterExtensions"];
+    preset["filterMode"] = normalized["filterMode"];
     preset["dateSource"] = normalized["dateSource"];
-    preset["dateFallbackEnabled"] = normalized["dateFallbackEnabled"];
     preset["dateFallbackOrder"] = normalized["dateFallbackOrder"];
-    preset["dateFallback5Text"] = normalized["dateFallback5Text"];
-    preset["dateMissingMode"] = normalized["dateMissingMode"];
-    preset["dateMissingText"] = normalized["dateMissingText"];
+    preset["dateFallbackCustomText"] = normalized["dateFallbackCustomText"];
     preset["realTimePreview"] = normalized["realTimePreview"];
     preset["checksumAlgorithm"] = normalized["checksumAlgorithm"];
     preset["checksumDigits"] = normalized["checksumDigits"];
@@ -1129,9 +1246,10 @@ public static bool ApplyPresetDictionary(IDictionary<string, object> preset, Dic
 
     bool applied = false;
     string[] keys = new string[] {
-        "rootMode", "rootPath", "startYear", "dateSource",
-        "dateFallbackEnabled", "dateFallbackOrder", "dateFallback5Text",
-        "dateMissingMode", "dateMissingText",
+        "rootMode", "rootPath", "startYear",
+        "filterExtensions", "filterMode",
+        "dateSource", "dateFallbackOrder", "dateFallbackCustomText",
+        "dateFallback5Text", "dateFallbackEnabled", "dateMissingMode", "dateMissingText",
         "realTimePreview", "checksumAlgorithm", "checksumDigits",
         "checksumPrefix", "checksumSuffix", "template"
     };

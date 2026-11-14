@@ -229,48 +229,75 @@ public static class TestHarness
 
         DateTime? effective;
         string source;
-        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "filename", true,
-            "filename,exif,modified,created", out effective, out source)
-            && effective == new DateTime(2020, 6, 15) && source == "exif",
+        string missing;
+        bool skipped;
+        CoreUnderTest.ResolveDateValue(dates, "filename",
+            "filename,exif,modified,created,empty", "自定义值",
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15) && source == "exif" && !skipped,
             "date resolve: fallback to exif");
-        Check(!CoreUnderTest.TryResolveEffectiveDate(dates, "filename", false,
-            "filename,exif,modified,created", out effective, out source),
-            "date resolve: fallback disabled returns missing");
-        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", false,
-            "filename,exif,modified,created", out effective, out source)
-            && effective == new DateTime(2020, 6, 15) && source == "exif",
+
+        CoreUnderTest.ResolveDateValue(dates, "exif",
+            "filename,exif,modified,created,empty", "自定义值",
+            out effective, out source, out missing, out skipped);
+        Check(effective == new DateTime(2020, 6, 15) && source == "exif",
             "date resolve: primary wins");
 
         dates["exif"] = null;
-        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", true,
-            "filename,exif,modified,created", out effective, out source)
-            && effective == new DateTime(2021, 1, 1) && source == "modified",
-            "date resolve: skips missing exif and finds modified");
+        CoreUnderTest.ResolveDateValue(dates, "exif",
+            "filename,empty,modified,created,empty", "自定义值",
+            out effective, out source, out missing, out skipped);
+        Check(!effective.HasValue && source == "empty" && missing.Length == 0,
+            "date resolve: empty stops fallback");
 
-        dates["modified"] = null;
-        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "exif", true,
-            "filename,exif,modified,created", out effective, out source)
-            && effective == new DateTime(2019, 1, 1) && source == "created",
-            "date resolve: falls back to created");
+        CoreUnderTest.ResolveDateValue(dates, "exif",
+            "custom,empty,empty,empty,empty", "缺失文本",
+            out effective, out source, out missing, out skipped);
+        Check(!effective.HasValue && source == "custom" && missing == "缺失文本",
+            "date resolve: custom missing text");
 
-        dates["exif"] = new DateTime(2020, 6, 15);
-        Check(CoreUnderTest.TryResolveEffectiveDate(dates, "filename", true,
-            "exif,created", out effective, out source)
-            && effective == new DateTime(2020, 6, 15) && source == "exif",
-            "date resolve: custom fallback order");
+        CoreUnderTest.ResolveDateValue(dates, "exif",
+            "skip,empty,empty,empty,empty", "缺失文本",
+            out effective, out source, out missing, out skipped);
+        Check(skipped && source == "skip", "date resolve: skip file");
 
-        CheckEqual("exif,created,filename,modified",
-            CoreUnderTest.NormalizeFallbackOrder("exif,exif,created"),
-            "date resolve: fallback order dedupe and fill");
+        Dictionary<string, DateTime?> emptyDates = new Dictionary<string, DateTime?>();
+        emptyDates["filename"] = null;
+        emptyDates["exif"] = null;
+        emptyDates["modified"] = null;
+        emptyDates["created"] = null;
+        CoreUnderTest.ResolveDateValue(emptyDates, "filename",
+            "filename,exif,modified,created,empty", "",
+            out effective, out source, out missing, out skipped);
+        Check(!effective.HasValue && source == "empty" && missing.Length == 0 && !skipped,
+            "date resolve: all missing defaults to empty");
 
-        Dictionary<string, DateTime?> empty = new Dictionary<string, DateTime?>();
-        empty["filename"] = null;
-        empty["exif"] = null;
-        empty["modified"] = null;
-        empty["created"] = null;
-        Check(!CoreUnderTest.TryResolveEffectiveDate(empty, "filename", true,
-            "filename,exif,modified,created", out effective, out source),
-            "date resolve: all missing returns false");
+        CheckEqual("filename,exif,modified,created,empty",
+            CoreUnderTest.NormalizeFallbackOrder(""), "date resolve: default five slots");
+        CheckEqual("skip,custom,empty,filename,created",
+            CoreUnderTest.NormalizeFallbackOrder("跳过,自定义,空值,文件名,创建"),
+            "date resolve: special tokens and aliases");
+    }
+
+    private static void TestFilter()
+    {
+        CheckEqual("jpg;png;mp4",
+            CoreUnderTest.NormalizeExtensionList("*.JPG, .png | mp4 jpg"),
+            "filter: normalize extension list");
+        Check(CoreUnderTest.ShouldSkipByFilter("jpg", "jpg;png", "skip"),
+            "filter: skip matching");
+        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "jpg;png", "skip"),
+            "filter: keep non-matching in skip mode");
+        Check(CoreUnderTest.ShouldSkipByFilter("txt", "jpg;png", "execute"),
+            "filter: skip non-matching in execute mode");
+        Check(!CoreUnderTest.ShouldSkipByFilter("png", "jpg;png", "execute"),
+            "filter: keep matching in execute mode");
+        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "", "execute"),
+            "filter: empty list does not filter");
+        Check(CoreUnderTest.ShouldSkipByFilter("txt", "*", "skip"),
+            "filter: wildcard matches all in skip mode");
+        Check(!CoreUnderTest.ShouldSkipByFilter("txt", "*", "execute"),
+            "filter: wildcard matches all in execute mode");
     }
 
     private static void TestPreset()
@@ -279,12 +306,11 @@ public static class TestHarness
         config["rootMode"] = "custom";
         config["rootPath"] = @"D:\Out";
         config["startYear"] = "2010";
+        config["filterExtensions"] = "jpg;png";
+        config["filterMode"] = "execute";
         config["dateSource"] = "exif";
-        config["dateFallbackEnabled"] = "false";
-        config["dateFallbackOrder"] = "exif,created";
-        config["dateFallback5Text"] = "兜底日期";
-        config["dateMissingMode"] = "custom";
-        config["dateMissingText"] = "未知日期";
+        config["dateFallbackOrder"] = "exif,created,custom,empty,skip";
+        config["dateFallbackCustomText"] = "兜底日期";
         config["realTimePreview"] = "false";
         config["checksumAlgorithm"] = "SHA-256";
         config["checksumDigits"] = "16";
@@ -293,14 +319,13 @@ public static class TestHarness
         config["template"] = "【根路径】/X-【校验码】.【扩展名】";
 
         Dictionary<string, object> preset = CoreUnderTest.BuildPresetDictionary(config);
-        Check(Convert.ToString(preset["presetVersion"]) == "0.03", "preset: version");
+        Check(Convert.ToString(preset["presetVersion"]) == "0.04", "preset: version");
         Check(Convert.ToString(preset["rootMode"]) == "custom", "preset: root mode");
         Check(Convert.ToString(preset["checksumDigits"]) == "16", "preset: digits");
-        Check(Convert.ToString(preset["dateFallbackEnabled"]) == "false", "preset: fallback flag");
-        Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,filename,modified", "preset: fallback order");
-        Check(Convert.ToString(preset["dateFallback5Text"]) == "兜底日期", "preset: fallback5 text");
-        Check(Convert.ToString(preset["dateMissingMode"]) == "custom", "preset: missing mode");
-        Check(Convert.ToString(preset["dateMissingText"]) == "未知日期", "preset: missing text");
+        Check(Convert.ToString(preset["filterExtensions"]) == "jpg;png", "preset: filter extensions");
+        Check(Convert.ToString(preset["filterMode"]) == "execute", "preset: filter mode");
+        Check(Convert.ToString(preset["dateFallbackOrder"]) == "exif,created,custom,empty,skip", "preset: fallback order");
+        Check(Convert.ToString(preset["dateFallbackCustomText"]) == "兜底日期", "preset: fallback custom text");
         Check(Convert.ToString(preset["realTimePreview"]) == "false", "preset: realtime flag");
 
         Dictionary<string, string> loaded = CoreUnderTest.CreateDefaultConfig(2000);
@@ -309,11 +334,10 @@ public static class TestHarness
         CheckEqual(@"D:\Out", loaded["rootPath"], "preset: root path");
         CheckEqual("2010", loaded["startYear"], "preset: start year");
         CheckEqual("exif", loaded["dateSource"], "preset: date source");
-        CheckEqual("false", loaded["dateFallbackEnabled"], "preset: fallback roundtrip");
-        CheckEqual("exif,created,filename,modified", loaded["dateFallbackOrder"], "preset: order roundtrip");
-        CheckEqual("兜底日期", loaded["dateFallback5Text"], "preset: fallback5 roundtrip");
-        CheckEqual("custom", loaded["dateMissingMode"], "preset: missing mode roundtrip");
-        CheckEqual("未知日期", loaded["dateMissingText"], "preset: missing text roundtrip");
+        CheckEqual("jpg;png", loaded["filterExtensions"], "preset: filter extensions roundtrip");
+        CheckEqual("execute", loaded["filterMode"], "preset: filter mode roundtrip");
+        CheckEqual("exif,created,custom,empty,skip", loaded["dateFallbackOrder"], "preset: order roundtrip");
+        CheckEqual("兜底日期", loaded["dateFallbackCustomText"], "preset: fallback custom roundtrip");
         CheckEqual("false", loaded["realTimePreview"], "preset: realtime roundtrip");
         CheckEqual("SHA-256", loaded["checksumAlgorithm"], "preset: algorithm");
         CheckEqual("16", loaded["checksumDigits"], "preset: digits roundtrip");
@@ -324,10 +348,10 @@ public static class TestHarness
         Dictionary<string, string> defaults = CoreUnderTest.CreateDefaultConfig(2000);
         CheckEqual("[", defaults["checksumPrefix"], "preset: default prefix is [");
         CheckEqual("]", defaults["checksumSuffix"], "preset: default suffix is ]");
-        CheckEqual("true", defaults["dateFallbackEnabled"], "preset: default fallback enabled");
-        CheckEqual("filename,exif,modified,created", defaults["dateFallbackOrder"], "preset: default fallback order");
-        CheckEqual("", defaults["dateFallback5Text"], "preset: default fallback5 empty");
-        CheckEqual("empty", defaults["dateMissingMode"], "preset: default missing mode");
+        CheckEqual("", defaults["filterExtensions"], "preset: default filter empty");
+        CheckEqual("skip", defaults["filterMode"], "preset: default filter mode");
+        CheckEqual("filename,exif,modified,created,empty", defaults["dateFallbackOrder"], "preset: default fallback order");
+        CheckEqual("", defaults["dateFallbackCustomText"], "preset: default fallback custom empty");
         CheckEqual("true", defaults["realTimePreview"], "preset: default realtime");
 
         Dictionary<string, string> partial = CoreUnderTest.CreateDefaultConfig(2000);
@@ -357,6 +381,7 @@ public static class TestHarness
         TestChecksumBadge();
         TestTemplateAndPath();
         TestDateResolution();
+        TestFilter();
         TestPreset();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
