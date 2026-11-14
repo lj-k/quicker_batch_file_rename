@@ -727,6 +727,71 @@ public static class TestHarness
             "flat preset: json serializer escapes text");
     }
 
+    private static void TestPresetStructureCompatibility()
+    {
+        Dictionary<string, string> config = CoreUnderTest.CreateDefaultConfig(2000);
+        Dictionary<string, object> single = CoreUnderTest.BuildPresetDictionary(config);
+        Dictionary<string, Dictionary<string, object>> store =
+            new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+        store["默认"] = single;
+
+        Dictionary<string, object> nestedWithoutVersion = new Dictionary<string, object>();
+        nestedWithoutVersion["presets"] = store;
+        Dictionary<string, Dictionary<string, object>> parsed =
+            CoreUnderTest.ParsePresetDictionary(nestedWithoutVersion);
+        Check(parsed.Count == 1 && parsed.ContainsKey("默认"),
+            "preset compat: nested without presetVersion");
+
+        Dictionary<string, object> flatNamedTemplate = new Dictionary<string, object>();
+        flatNamedTemplate["template"] = CoreUnderTest.SerializeJsonValue(single);
+        parsed = CoreUnderTest.ParsePresetDictionary(flatNamedTemplate);
+        Check(parsed.Count == 1 && parsed.ContainsKey("template"),
+            "preset compat: preset named like config key");
+
+        Dictionary<string, object> flatNamedPresets = new Dictionary<string, object>();
+        flatNamedPresets["presets"] = CoreUnderTest.SerializeJsonValue(single);
+        parsed = CoreUnderTest.ParsePresetDictionary(flatNamedPresets);
+        Check(parsed.Count == 1 && parsed.ContainsKey("presets"),
+            "preset compat: preset named presets");
+
+        parsed = CoreUnderTest.ParsePresetDictionary(single);
+        Check(parsed.Count == 1 && parsed.ContainsKey("默认"),
+            "preset compat: legacy single config");
+    }
+
+    private static void TestExtensionPresetStore()
+    {
+        Dictionary<string, string> store =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        store["图片"] = "jpg;png";
+        store["文档"] = "doc;docx";
+
+        Dictionary<string, object> flat = CoreUnderTest.BuildFlatExtensionPresetDictionary(store);
+        Check(flat.Count == 2, "ext preset: flat count");
+        Check(flat["图片"] is string, "ext preset: flat value is plain string");
+
+        Dictionary<string, string> parsed = CoreUnderTest.ParseExtensionPresetDictionary(flat);
+        Check(parsed.Count == 2, "ext preset: parse flat count");
+        CheckEqual("jpg;png", parsed["图片"], "ext preset: parse flat value");
+        CheckEqual("doc;docx", parsed["文档"], "ext preset: parse second value");
+
+        Dictionary<string, object> legacy = new Dictionary<string, object>();
+        legacy["presetVersion"] = "0.05";
+        Dictionary<string, object> presets = new Dictionary<string, object>();
+        presets["图片"] = "jpg;png";
+        legacy["presets"] = presets;
+        parsed = CoreUnderTest.ParseExtensionPresetDictionary(legacy);
+        Check(parsed.Count == 1 && parsed.ContainsKey("图片"),
+            "ext preset: migrate legacy nested");
+        Check(!parsed.ContainsKey("presetVersion"), "ext preset: ignore version key");
+
+        object jsonValue;
+        Check(CoreUnderTest.TryParseJson(CoreUnderTest.SerializeJsonValue(flat), out jsonValue),
+            "ext preset: serialize flat store");
+        parsed = CoreUnderTest.ParseExtensionPresetDictionary(jsonValue);
+        Check(parsed.Count == 2, "ext preset: parse serialized store");
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -741,6 +806,8 @@ public static class TestHarness
         TestPreset();
         TestPresetJsonState();
         TestFlatPresetStore();
+        TestPresetStructureCompatibility();
+        TestExtensionPresetStore();
         Console.WriteLine();
         Console.WriteLine("RESULT passed=" + _passed + " failed=" + _failed);
         return _failed == 0 ? 0 : 1;

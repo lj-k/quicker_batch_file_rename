@@ -11,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.5
+// 版本：0.06.6
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -1987,12 +1987,12 @@ public static Dictionary<string, Dictionary<string, object>> ParsePresetDictiona
         return store;
 
     object presetsObject;
-    if (root.ContainsKey("presetVersion") &&
-        root.TryGetValue("presets", out presetsObject) && presetsObject != null)
+    if (root.TryGetValue("presets", out presetsObject) && presetsObject != null)
     {
-        // 旧结构：{ presetVersion, presets: { 名称: 配置词典 } }
+        // 旧结构：{ presetVersion, presets: { 名称: 配置词典 } }。
+        // 部分状态读回可能丢失 presetVersion，因此只要 presets 的值不是单套配置就按旧结构处理。
         IDictionary<string, object> presets = ConvertToObjectDictionary(presetsObject);
-        if (presets != null)
+        if (presets != null && !LooksLikePresetConfigDictionary(presets))
         {
             foreach (KeyValuePair<string, object> pair in presets)
             {
@@ -2000,8 +2000,8 @@ public static Dictionary<string, Dictionary<string, object>> ParsePresetDictiona
                 if (config != null)
                     store[pair.Key] = CopyPresetDictionary(config);
             }
+            return store;
         }
-        return store;
     }
 
     if (LooksLikePresetConfigDictionary(root))
@@ -2019,6 +2019,63 @@ public static Dictionary<string, Dictionary<string, object>> ParsePresetDictiona
         IDictionary<string, object> config = ConvertToObjectDictionary(pair.Value);
         if (config != null)
             store[pair.Key] = CopyPresetDictionary(config);
+    }
+    return store;
+}
+
+// 扩展名预设与主预设使用同一种扁平结构：{ 预设名: 扩展名列表字符串 }。
+// Quicker“保存为状态”读回时字符串值不会退化为嵌套词典。
+public static Dictionary<string, object> BuildFlatExtensionPresetDictionary(
+    IDictionary<string, string> store)
+{
+    Dictionary<string, object> flat =
+        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+    if (store == null)
+        return flat;
+
+    foreach (KeyValuePair<string, string> pair in store)
+    {
+        if (pair.Key == null || pair.Key.Trim().Length == 0)
+            continue;
+        flat[pair.Key] = pair.Value == null ? "" : pair.Value;
+    }
+    return flat;
+}
+
+public static Dictionary<string, string> ParseExtensionPresetDictionary(object value)
+{
+    Dictionary<string, string> store =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    IDictionary<string, object> root = ConvertToObjectDictionary(value);
+    if (root == null)
+        return store;
+
+    object presetsObject;
+    if (root.TryGetValue("presets", out presetsObject) && presetsObject != null)
+    {
+        // 兼容旧结构：{ presetVersion, presets: { 名称: 扩展名列表 } }。
+        IDictionary<string, object> presets = ConvertToObjectDictionary(presetsObject);
+        if (presets != null)
+        {
+            foreach (KeyValuePair<string, object> pair in presets)
+            {
+                if (pair.Key == null || pair.Key.Trim().Length == 0 || pair.Value == null)
+                    continue;
+                store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
+            }
+            return store;
+        }
+    }
+
+    foreach (KeyValuePair<string, object> pair in root)
+    {
+        if (pair.Key == null || pair.Key.Trim().Length == 0 || pair.Value == null)
+            continue;
+        if (pair.Key == "presetVersion" && !(pair.Value is IDictionary))
+            continue;
+        if (pair.Value is IDictionary)
+            continue;
+        store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
     }
     return store;
 }
@@ -2184,8 +2241,19 @@ private static Dictionary<string, object> CopyPresetDictionary(IDictionary<strin
 
 private static bool LooksLikePresetConfigDictionary(IDictionary<string, object> dictionary)
 {
-    return dictionary.ContainsKey("rootMode") || dictionary.ContainsKey("template") ||
-        dictionary.ContainsKey("dateSource") || dictionary.ContainsKey("checksumAlgorithm");
+    if (dictionary == null)
+        return false;
+    // 单套配置同时包含多个配置键；要求至少命中2个，避免把名为 template、
+    // rootMode 等配置键的扁平预设误判为旧版单预设。
+    int matches = 0;
+    for (int i = 0; i < PresetConfigKeys.Length; i++)
+    {
+        if (dictionary.ContainsKey(PresetConfigKeys[i]))
+            matches++;
+        if (matches >= 2)
+            return true;
+    }
+    return false;
 }
 
 // Quicker“保存为状态”会把嵌套词典序列化成JSON文本；启动时用以下解析器还原。

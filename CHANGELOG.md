@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.06.6] - 2026-11-14
+
+### Changed
+
+- 【扩展名预设】同步改为扁平结构：key为预设名称，value为扩展名列表字符串；兼容旧 `{presetVersion, presets}` 结构。
+- 旧嵌套结构识别不再依赖 `presetVersion`，只要 `presets` 的值不是单套配置就按旧结构读取。
+- 单套配置识别要求至少命中2个配置键，避免预设名恰好为 `template`、`presets` 时误判。
+- 保存同名预设且配置未变化时也回写一次扁平结构，顺带完成旧结构迁移。
+
+### Fixed
+
+- 数据映射把未赋值的预设变量传成空词典或空字符串时，窗口会回退通过 `GetVarValue` 读取动作变量，避免已保存预设显示为空。
+
+### Added
+
+- 核心新增 `BuildFlatExtensionPresetDictionary`、`ParseExtensionPresetDictionary`。
+- 新增 13 项测试：旧嵌套缺少版本键、配置键同名预设、名为 `presets` 的预设、扩展名预设扁平往返与旧结构迁移。
+
+### Verified
+
+- 核心测试 297 项通过，0 项失败。
+- 辅助 C# 按 C# 5 / .NET Framework 4.8 参考程序集编译通过。
+- 两套 release 重新生成；XAML 解析、控件命名与版本一致性校验通过。
+
 ## [0.06.5] - 2026-11-14
 
 ### Changed

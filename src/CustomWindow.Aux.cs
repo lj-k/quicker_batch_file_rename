@@ -26,7 +26,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.5
+// 版本：0.06.6
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2144,6 +2144,8 @@ private static void SavePreset_Click(object sender, RoutedEventArgs e)
         string diff = BuildPresetDiff(oldConfig, _config);
         if (diff.Length == 0)
         {
+            // 配置未变化也回写一次，顺带把旧嵌套结构迁移成扁平结构。
+            SavePresetStore(store);
             _statusText.Text = "预设“" + existingName + "”与当前配置一致，无需覆盖";
             return;
         }
@@ -2269,42 +2271,14 @@ private static void SaveExtPreset_Click(object sender, RoutedEventArgs e)
 
 private static Dictionary<string, string> LoadExtensionPresetStore()
 {
-    Dictionary<string, string> store =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     if (_data == null)
-        return store;
+        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
     object presetObject;
     if (!_data.TryGetValue("extensionPresets", out presetObject) || presetObject == null)
-        return store;
+        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-    IDictionary<string, object> root = AsObjectDictionary(presetObject);
-    if (root == null)
-        return store;
-
-    object presetsObject;
-    if (root.TryGetValue("presets", out presetsObject) && presetsObject != null)
-    {
-        IDictionary<string, object> presets = AsObjectDictionary(presetsObject);
-        if (presets != null)
-        {
-            foreach (KeyValuePair<string, object> pair in presets)
-            {
-                if (pair.Value != null)
-                    store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
-            }
-        }
-        return store;
-    }
-
-    foreach (KeyValuePair<string, object> pair in root)
-    {
-        if (pair.Key == "presetVersion" || pair.Value == null)
-            continue;
-        if (pair.Value is string || pair.Value is IConvertible)
-            store[pair.Key] = Convert.ToString(pair.Value, CultureInfo.InvariantCulture);
-    }
-    return store;
+    return ParseExtensionPresetDictionary(presetObject);
 }
 
 private static void SaveExtensionPresetStore(Dictionary<string, string> store)
@@ -2312,16 +2286,11 @@ private static void SaveExtensionPresetStore(Dictionary<string, string> store)
     if (_data == null)
         return;
 
-    Dictionary<string, object> root =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    root["presetVersion"] = "0.05";
-    Dictionary<string, object> presets =
-        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-    foreach (KeyValuePair<string, string> pair in store)
-        presets[pair.Key] = pair.Value;
-    root["presets"] = presets;
-    _data["extensionPresets"] = root;
-    PublishActionVariable("扩展名预设", root);
+    // 与主预设一致：key为预设名，value为扩展名列表字符串，避免嵌套词典状态退化。
+    Dictionary<string, object> flat = BuildFlatExtensionPresetDictionary(store);
+    _data["extensionPresets"] = flat;
+
+    PublishActionVariable("扩展名预设", flat);
 }
 
 private static string FindExtensionPresetKey(Dictionary<string, string> store, string name)
@@ -2364,23 +2333,41 @@ private static void PrimePresetVariables()
     if (_data == null)
         return;
 
-    if (!_data.ContainsKey("preset") || _data["preset"] == null)
-    {
-        object presetValue;
-        if (TryGetActionVariable("批量重命名器预设", out presetValue) && presetValue != null)
-            _data["preset"] = presetValue;
-    }
-    if (!_data.ContainsKey("extensionPresets") || _data["extensionPresets"] == null)
-    {
-        object extValue;
-        if (TryGetActionVariable("扩展名预设", out extValue) && extValue != null)
-            _data["extensionPresets"] = extValue;
-    }
+    object presetValue;
+    bool presetMissing = !_data.TryGetValue("preset", out presetValue) ||
+        IsVariableMissing(presetValue);
+    if (presetMissing && TryGetActionVariable("批量重命名器预设", out presetValue) &&
+        !IsVariableMissing(presetValue))
+        _data["preset"] = presetValue;
+
+    object extValue;
+    bool extMissing = !_data.TryGetValue("extensionPresets", out extValue) ||
+        IsVariableMissing(extValue);
+    if (extMissing && TryGetActionVariable("扩展名预设", out extValue) &&
+        !IsVariableMissing(extValue))
+        _data["extensionPresets"] = extValue;
 
     // Quicker“保存为状态”会把嵌套词典序列化成JSON文本，下次启动时变量可能是string。
     // 在窗口数据层先还原成词典，后续载入、保存和关闭写回都使用词典对象。
     NormalizePresetVariable("preset");
     NormalizePresetVariable("extensionPresets");
+}
+
+// 数据映射可能把未赋值的词典变量传成空词典或空字符串；此时应回退读取动作变量。
+private static bool IsVariableMissing(object value)
+{
+    if (value == null)
+        return true;
+
+    string text = value as string;
+    if (text != null)
+        return text.Trim().Length == 0;
+
+    IDictionary dictionary = value as IDictionary;
+    if (dictionary != null)
+        return dictionary.Count == 0;
+
+    return false;
 }
 
 private static void NormalizePresetVariable(string key)
