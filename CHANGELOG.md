@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.06.9] - 2026-11-14
+
+### Changed
+
+- 扫描：单线程顺序读取改为分块并行调度器。`Interlocked.Increment` 分配32文件分块，每个分块只被一个线程处理；独立发布线程按输入顺序合并结果，保证预览、输出和执行顺序稳定。
+- OneDrive：新增云占位属性识别（Offline / RecallOnOpen / RecallOnDataAccess）。云端占位文件跳过EXIF内容读取，避免扫描时触发整文件下载；详情中显示“云端占位”状态。
+- 输入：路径存在性与目录判断从UI线程移到扫描线程，避免大量云路径在窗口加载时阻塞界面。
+- 目标路径：超过1024行时，目标路径与文件名在后台并行计算；`RunIndexedParallel` 按索引原子分发，最多8线程；重复目标与目标存在性检查并行执行，最多12线程。
+- 并发：新增 `_recomputeGeneration` 代际号。配置变化、日期刷新、重新扫描、关闭窗口都会使旧任务作废；后台只写独立 `RowLayout` 槽位，UI线程统一 `ApplyLayouts`，避免跨线程修改绑定词典。
+- 执行：执行期间禁止重算，避免覆盖执行状态；哈希完成与布局计算并行时，若缓存已齐但仍显示“校验码计算中”，自动补一次同步重算。
+
+### Added
+
+- `IsCloudPlaceholderAttributes` 核心函数与6项属性组合测试：Offline、RecallOnDataAccess、RecallOnOpen、组合属性、普通归档、无属性。
+
+### Verified
+
+- 核心测试 393 项通过，0 项失败。
+- 辅助 C# 按 C# 5 / .NET Framework 4.8 参考程序集编译通过。
+- 两套 release 重新生成并通过交付校验。
+
 ## [0.06.8] - 2026-11-14
 
 ### Changed

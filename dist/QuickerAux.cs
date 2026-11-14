@@ -1,5 +1,5 @@
 // 批量重命名器 - Quicker 辅助C#代码（由 tools/build_quicker_code.py 生成）
-// 版本：0.06.8
+// 版本：0.06.9
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -30,7 +30,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.8
+// 版本：0.06.9
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -501,6 +501,18 @@ public static string DescribeTransferProfile(string path, long fileSize)
 {
     DriveType drive = GetDriveTypeSafe(path);
     return drive.ToString().ToLowerInvariant() + ":" + SelectCopyBufferSize(path, fileSize).ToString(CultureInfo.InvariantCulture);
+}
+
+// Windows 云筛选器占位属性：内容不在本地，打开文件会触发下载。
+public const int FileAttributeOffline = 0x00001000;
+public const int FileAttributeRecallOnOpen = 0x00040000;
+public const int FileAttributeRecallOnDataAccess = 0x00400000;
+
+public static bool IsCloudPlaceholderAttributes(int fileAttributes)
+{
+    return (fileAttributes & FileAttributeOffline) != 0 ||
+        (fileAttributes & FileAttributeRecallOnOpen) != 0 ||
+        (fileAttributes & FileAttributeRecallOnDataAccess) != 0;
 }
 
 public static bool IsSameVolumePath(string source, string target)
@@ -2639,7 +2651,7 @@ private static void SkipJsonWhitespace(string text, ref int index)
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.8
+// 版本：0.06.9
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -2755,6 +2767,51 @@ private static bool _execTemplateNeedsHash = false;
 private static readonly string[] ExifExtensions = new string[] {
     ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp", ".gif", ".heic", ".heif", ".webp"
 };
+
+// 目标路径布局的代际号：配置变化时递增，旧的后台计算自动作废。
+private static int _recomputeGeneration = 0;
+private const int AsyncRecomputeThreshold = 1024;
+private const int ScanChunkSize = 32;
+private const int ScanMaxWorkers = 12;
+private const int ScanPublishBatchSize = 200;
+// 每个计算线程复用一份模板词典，避免逐文件分配。
+[ThreadStatic] private static Dictionary<string, string> _layoutValues;
+
+// 单行的目标路径计算结果。后台线程只写自己的槽位，UI线程统一应用。
+private sealed class RowLayout
+{
+    public string TargetPath;
+    public string Action;
+    public string Status;
+    public string Error;
+    public string HashHex;
+    public bool HasError;
+    public bool IsPending;
+    public bool HashPending;
+    public bool FilterSkipped;
+    public bool IsSkipped;
+    public bool TargetExists;
+    public bool TargetCheckFailed;
+}
+
+// 一次重算使用的配置快照，保证后台线程读取期间不受界面修改影响。
+private sealed class LayoutContext
+{
+    public string Template;
+    public bool TemplateValid;
+    public string BadToken;
+    public bool NeedsHash;
+    public string Algorithm;
+    public int Digits;
+    public string Prefix;
+    public string Suffix;
+    public string RootMode;
+    public string CustomRoot;
+    public bool CustomRootMissing;
+    public string FilterMode;
+    public string FilterExtensions;
+    public bool HasFilter;
+}
 
 // ---------------------------------------------------------------------------
 // Quicker 回调
@@ -2884,6 +2941,7 @@ private static void ResetRuntimeState()
     _hashAlgorithm = "";
     _scanGeneration++;
     _hashGeneration++;
+    Interlocked.Increment(ref _recomputeGeneration);
     _hashTotal = 0;
     _hashDone = 0;
     _skippedFolders = 0;
@@ -3525,8 +3583,12 @@ private static void AbsorbConfigFromUi(string oldAlgorithm, int oldDigits)
 }
 
 // 合并“重算文件名日期”和“重算有效日期”两条几乎相同的路径。
-private static void RefreshDates(bool recomputeFilenameDates, bool recomputeTarget)
+private static void RefreshDates(bool recomputeFilenameDates, bool recomputeTarget,
+    bool synchronous = false)
 {
+    // 日期刷新会写行数据；先作废可能仍在运行的后台布局，避免并发读写词典。
+    Interlocked.Increment(ref _recomputeGeneration);
+
     if (recomputeFilenameDates)
     {
         for (int i = 0; i < _files.Count; i++)
@@ -3540,7 +3602,7 @@ private static void RefreshDates(bool recomputeFilenameDates, bool recomputeTarg
 
     if (recomputeTarget)
     {
-        RecomputeAll();
+        RecomputeAll(synchronous);
     }
     else
     {
@@ -3635,16 +3697,6 @@ private static void AddInputPath(string rawPath)
         return;
     }
 
-    if (Directory.Exists(fullPath))
-    {
-        _skippedFolders++;
-        return;
-    }
-    if (!File.Exists(fullPath))
-    {
-        _skippedInvalid++;
-        return;
-    }
     if (_pathSet.Add(fullPath))
         _paths.Add(fullPath);
 }
@@ -3653,6 +3705,9 @@ private static void StartScan()
 {
     _scanning = true;
     _scanGeneration++;
+    Interlocked.Increment(ref _recomputeGeneration);
+    _skippedFolders = 0;
+    _skippedInvalid = 0;
     int generation = _scanGeneration;
     List<string> paths = new List<string>(_paths);
     Dispatcher dispatcher = _window.Dispatcher;
@@ -3661,48 +3716,131 @@ private static void StartScan()
     _progress.IsIndeterminate = true;
     _statusText.Text = "正在读取文件属性…";
 
-    Thread thread = new Thread(delegate()
+    int chunkCount = (paths.Count + ScanChunkSize - 1) / ScanChunkSize;
+    if (chunkCount <= 0)
     {
-        ScanWorker(paths, generation, dispatcher);
-    });
-    thread.IsBackground = true;
-    thread.Start();
-}
-
-private static void ScanWorker(List<string> paths, int generation, Dispatcher dispatcher)
-{
-    List<Dictionary<string, object>> batch = new List<Dictionary<string, object>>();
-    for (int i = 0; i < paths.Count; i++)
-    {
-        if (generation != _scanGeneration)
-            return;
-
-        Dictionary<string, object> item = BuildFileItem(paths[i]);
-        if (item == null)
-            continue;
-        batch.Add(item);
-
-        if (batch.Count >= 50)
-        {
-            List<Dictionary<string, object>> send = batch;
-            batch = new List<Dictionary<string, object>>();
-            Post(dispatcher, delegate()
-            {
-                if (generation == _scanGeneration)
-                    AddFileBatch(send);
-            });
-        }
+        FinishScan(generation);
+        return;
     }
 
-    List<Dictionary<string, object>> finalBatch = batch;
-    Post(dispatcher, delegate()
+    // 调度器：每个分块只被一个线程领取；线程只写自己的结果槽位，
+    // 由发布线程按输入顺序合并到界面，避免共享集合并发修改。
+    List<Dictionary<string, object>>[] chunkResults =
+        new List<Dictionary<string, object>>[chunkCount];
+    int[] chunkReady = new int[chunkCount];
+    object sync = new object();
+    int nextChunk = -1;
+    int workerCount = Math.Min(chunkCount,
+        Math.Min(ScanMaxWorkers, Math.Max(4, Environment.ProcessorCount * 2)));
+    int workersRemaining = workerCount;
+
+    for (int w = 0; w < workerCount; w++)
     {
-        if (generation == _scanGeneration)
+        Thread worker = new Thread(delegate()
         {
-            AddFileBatch(finalBatch);
-            FinishScan(generation);
+            try
+            {
+                while (true)
+                {
+                    int chunk = Interlocked.Increment(ref nextChunk);
+                    if (chunk >= chunkCount || generation != _scanGeneration)
+                        break;
+
+                    int start = chunk * ScanChunkSize;
+                    int end = Math.Min(start + ScanChunkSize, paths.Count);
+                    List<Dictionary<string, object>> batch =
+                        new List<Dictionary<string, object>>(end - start);
+                    try
+                    {
+                        for (int i = start; i < end; i++)
+                        {
+                            if (generation != _scanGeneration)
+                                break;
+                            bool isDirectory;
+                            Dictionary<string, object> item = BuildFileItem(paths[i], out isDirectory);
+                            if (item != null)
+                                batch.Add(item);
+                            else if (isDirectory)
+                                Interlocked.Increment(ref _skippedFolders);
+                            else
+                                Interlocked.Increment(ref _skippedInvalid);
+                        }
+                    }
+                    catch
+                    {
+                        // 单个分块异常不能阻塞有序发布。
+                    }
+
+                    chunkResults[chunk] = batch;
+                    Thread.VolatileWrite(ref chunkReady[chunk], 1);
+                    lock (sync)
+                        Monitor.PulseAll(sync);
+                }
+            }
+            finally
+            {
+                lock (sync)
+                {
+                    workersRemaining--;
+                    Monitor.PulseAll(sync);
+                }
+            }
+        });
+        worker.IsBackground = true;
+        worker.Start();
+    }
+
+    // 发布线程：只按顺序发布已就绪的连续分块，保证列表顺序与输入一致。
+    Thread publisher = new Thread(delegate()
+    {
+        int published = 0;
+        while (true)
+        {
+            List<Dictionary<string, object>> merged = new List<Dictionary<string, object>>();
+            bool done;
+            lock (sync)
+            {
+                while (published < chunkCount &&
+                    Thread.VolatileRead(ref chunkReady[published]) == 1)
+                {
+                    List<Dictionary<string, object>> chunk = chunkResults[published];
+                    chunkResults[published] = null;
+                    if (chunk != null)
+                        merged.AddRange(chunk);
+                    published++;
+                    if (merged.Count >= ScanPublishBatchSize)
+                        break;
+                }
+                done = workersRemaining == 0 && published >= chunkCount;
+                if (merged.Count == 0 && !done)
+                    Monitor.Wait(sync, 50);
+            }
+
+            if (generation != _scanGeneration)
+                return;
+
+            if (merged.Count > 0)
+            {
+                List<Dictionary<string, object>> send = merged;
+                Post(dispatcher, delegate()
+                {
+                    if (generation == _scanGeneration)
+                        AddFileBatch(send);
+                });
+            }
+
+            if (done)
+                break;
         }
+
+        Post(dispatcher, delegate()
+        {
+            if (generation == _scanGeneration)
+                FinishScan(generation);
+        });
     });
+    publisher.IsBackground = true;
+    publisher.Start();
 }
 
 private static void AddFileBatch(List<Dictionary<string, object>> batch)
@@ -3729,7 +3867,12 @@ private static void FinishScan(int generation)
 
     int expected = _paths.Count;
     if (_files.Count < expected)
-        _skippedInvalid += (expected - _files.Count);
+    {
+        // 目录/无效路径已在扫描线程中分类计数，这里只记录剩余差异。
+        int accounted = _skippedFolders + _skippedInvalid;
+        if (expected - accounted > _files.Count)
+            _skippedInvalid += expected - accounted - _files.Count;
+    }
 
     // 日期已在 AddFileBatch 中逐项计算，这里不再全量重复计算。
     _previewDirty = false;
@@ -3737,13 +3880,18 @@ private static void FinishScan(int generation)
     RecomputeAll();
 }
 
-private static Dictionary<string, object> BuildFileItem(string path)
+private static Dictionary<string, object> BuildFileItem(string path, out bool isDirectory)
 {
+    isDirectory = false;
     try
     {
         FileInfo info = new FileInfo(path);
         if (!info.Exists)
+        {
+            try { isDirectory = Directory.Exists(path); }
+            catch { }
             return null;
+        }
 
         Dictionary<string, object> item = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         item["SourcePath"] = info.FullName;
@@ -3755,7 +3903,14 @@ private static Dictionary<string, object> BuildFileItem(string path)
         item["SizeText"] = FormatSize(info.Length);
         item["Created"] = info.CreationTime;
         item["Modified"] = info.LastWriteTime;
-        item["ExifDate"] = TryReadExifDate(info.FullName);
+
+        // OneDrive等云占位文件的内容不在本地，读取EXIF会触发下载。
+        // 这里只读取一次属性，云端占位直接跳过内容读取，避免整批扫描被网络拖慢。
+        int attributes = 0;
+        try { attributes = (int)info.Attributes; } catch { }
+        bool cloudOnly = IsCloudPlaceholderAttributes(attributes);
+        item["CloudOnly"] = cloudOnly;
+        item["ExifDate"] = cloudOnly ? null : TryReadExifDate(info.FullName);
         item["FileNameDate"] = null;
         item["EffectiveDate"] = null;
         item["EffectiveSource"] = "";
@@ -3947,6 +4102,9 @@ private static void EnsureHashWorker()
         _hashTotal = 0;
         _hashDone = 0;
         _progress.Visibility = Visibility.Collapsed;
+        // 布局计算与哈希可能并行完成；若缓存已齐但行仍显示“计算中”，补一次同步重算。
+        if (CountPendingRows() > 0)
+            RecomputeAll(true);
         return;
     }
 
@@ -4077,230 +4235,417 @@ private static void UpdateHashProgress()
 
 private static void RecomputeAll()
 {
-    if (_grid == null || _scanning || _previewDirty)
+    RecomputeAll(false);
+}
+
+// synchronous=true 用于执行前和预设载入，保证调用返回时布局已就绪。
+private static void RecomputeAll(bool synchronous)
+{
+    if (_grid == null || _scanning || _previewDirty || _executing)
         return;
 
-    string template = _config["template"];
-    string badToken;
-    bool templateValid = ValidateTemplateTokens(template, out badToken);
-    bool needsHash = TemplateNeedsHash(template);
+    LayoutContext context = CreateLayoutContext();
+    int generation = Interlocked.Increment(ref _recomputeGeneration);
+    int count = _files.Count;
 
-    string algorithm = _config["checksumAlgorithm"];
-    int digits = GetConfigInt(_config, "checksumDigits", 8);
-    string prefix = _config["checksumPrefix"];
-    string suffix = _config["checksumSuffix"];
-    string rootMode = _config["rootMode"];
-    string customRoot = _config["rootPath"];
-    bool customRootMissing = (rootMode == "custom" &&
-        (customRoot == null || customRoot.Trim().Length == 0));
-    string filterMode = _config["filterMode"];
-    string filterExtensions = NormalizeExtensionList(_config["filterExtensions"]);
-    bool hasFilter = filterExtensions.Length > 0;
-    // 批次内复用同一模板词典，避免每个文件重复分配。
-    Dictionary<string, string> templateValues = new Dictionary<string, string>(StringComparer.Ordinal);
-
-    // 第一遍：计算每个文件的动作和目标路径。
-    for (int i = 0; i < _files.Count; i++)
+    if (synchronous || count < AsyncRecomputeThreshold)
     {
-        Dictionary<string, object> item = _files[i];
-        item["HasError"] = false;
-        item["IsPending"] = false;
-        item["Error"] = "";
-        item["Status"] = "就绪";
-        item["TargetPath"] = "";
-        item["HashHex"] = null;
-        item["HashPending"] = false;
-        item["FilterSkipped"] = false;
-        item["ExecState"] = "";
-        item["ExecDetails"] = "";
+        RowLayout[] layouts = ComputeLayouts(context, generation);
+        if (layouts != null)
+            ApplyLayouts(layouts, context);
+        return;
+    }
 
-        string itemExtension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
-        bool extensionMatched = hasFilter && ExtensionMatchesFilter(itemExtension, filterExtensions);
-        string action = ResolveAction(filterMode, extensionMatched, hasFilter, true);
-        bool filterSkip = action == "跳过";
-        item["FilterSkipped"] = filterSkip;
-        item["IsSkipped"] = filterSkip || GetBool(item, "DateSkipped");
-        item["Action"] = action;
-        if (GetBool(item, "IsSkipped"))
+    _statusText.Text = "正在计算目标路径…";
+    Dispatcher dispatcher = _window.Dispatcher;
+    Thread thread = new Thread(delegate()
+    {
+        RowLayout[] layouts = ComputeLayouts(context, generation);
+        if (layouts == null)
+            return;
+        Post(dispatcher, delegate()
         {
-            item["Action"] = "跳过";
-            item["Status"] = filterSkip ? "过滤跳过" : "日期跳过";
-            RefreshRowDetails(item);
-            continue;
-        }
+            if (generation == _recomputeGeneration && !_scanning && !_previewDirty && !_executing)
+                ApplyLayouts(layouts, context);
+        });
+    });
+    thread.IsBackground = true;
+    thread.Start();
+}
 
-        if (!templateValid)
+private static LayoutContext CreateLayoutContext()
+{
+    LayoutContext context = new LayoutContext();
+    context.Template = _config["template"];
+    string badToken;
+    context.TemplateValid = ValidateTemplateTokens(context.Template, out badToken);
+    context.BadToken = badToken;
+    context.NeedsHash = TemplateNeedsHash(context.Template);
+    context.Algorithm = _config["checksumAlgorithm"];
+    context.Digits = GetConfigInt(_config, "checksumDigits", 8);
+    context.Prefix = _config["checksumPrefix"];
+    context.Suffix = _config["checksumSuffix"];
+    context.RootMode = _config["rootMode"];
+    context.CustomRoot = _config["rootPath"];
+    context.CustomRootMissing = context.RootMode == "custom" &&
+        (context.CustomRoot == null || context.CustomRoot.Trim().Length == 0);
+    context.FilterMode = _config["filterMode"];
+    context.FilterExtensions = NormalizeExtensionList(_config["filterExtensions"]);
+    context.HasFilter = context.FilterExtensions.Length > 0;
+    return context;
+}
+
+// 多线程计算布局：每个索引只由一个线程处理并写入自己的槽位，
+// 线程之间不共享可变集合；生成号变化时立即停止。
+private static RowLayout[] ComputeLayouts(LayoutContext context, int generation)
+{
+    int count = _files.Count;
+    RowLayout[] layouts = new RowLayout[count];
+    int cancelled = 0;
+
+    RunIndexedParallel(count, SelectComputeWorkers(count), delegate(int index)
+    {
+        if (Thread.VolatileRead(ref _recomputeGeneration) != generation)
         {
-            SetRowError(item, badToken == null || badToken.Length == 0
-                ? "目标路径模板为空" : "模板包含未知胶囊：" + badToken, "模板错误");
-            continue;
+            Interlocked.Exchange(ref cancelled, 1);
+            return;
         }
-
-        string rootDirectory = rootMode == "custom"
-            ? customRoot : Convert.ToString(item["Dir"], CultureInfo.InvariantCulture);
-        if (rootMode == "custom" && customRootMissing)
-        {
-            SetRowError(item, "根路径为其他文件夹，但尚未选择文件夹", "根路径错误");
-            continue;
-        }
-        if (rootDirectory == null || rootDirectory.Trim().Length == 0)
-        {
-            SetRowError(item, "无法确定根路径", "根路径错误");
-            continue;
-        }
-
-        DateTime? effectiveDate = GetDate(item, "EffectiveDate");
-
-        bool hashPending = false;
-        string checksum = "";
-        if (needsHash)
-        {
-            string path = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
-            bool hashError;
-            string hash = GetCachedHash(path, algorithm, out hashError);
-            if (hashError)
-            {
-                SetRowError(item, "校验码计算失败", "校验码失败");
-                continue;
-            }
-            if (hash == null)
-            {
-                hashPending = true;
-                checksum = BuildPendingChecksumBadge(algorithm, digits, prefix, suffix);
-            }
-            else
-            {
-                item["HashHex"] = hash;
-                checksum = BuildChecksumBadge(algorithm, digits, prefix, suffix, hash);
-            }
-        }
-
-        string baseName = Convert.ToString(item["BaseName"], CultureInfo.InvariantCulture);
-        string extension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
-        string missingDateText = Convert.ToString(item["MissingDateText"], CultureInfo.InvariantCulture);
-        string target;
-        string error;
-        bool ok = TryBuildTargetPath(template, rootDirectory, effectiveDate, missingDateText,
-            baseName, extension, checksum, templateValues, out target, out error);
-
-        if (!ok)
-        {
-            SetRowError(item, error == null ? "无法生成目标路径" : error, "路径错误");
-            continue;
-        }
-
-        item["TargetPath"] = target;
-
-        string sourcePath = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
-        string sourceDir = Convert.ToString(item["Dir"], CultureInfo.InvariantCulture);
-        string targetDir = "";
         try
         {
-            targetDir = Path.GetDirectoryName(target);
+            layouts[index] = ComputeLayout(_files[index], context);
         }
-        catch
+        catch (Exception ex)
         {
-            targetDir = "";
+            RowLayout layout = new RowLayout();
+            layout.HasError = true;
+            layout.Status = "路径错误";
+            layout.Error = "内部错误：" + ex.Message;
+            layouts[index] = layout;
         }
-        bool sameDirectory = string.Equals(sourceDir == null ? "" : sourceDir.TrimEnd('\\'),
-            targetDir == null ? "" : targetDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
-        string finalAction = ResolveAction(filterMode, extensionMatched, hasFilter, sameDirectory);
-        item["Action"] = finalAction;
-        if ((finalAction == "复制" || finalAction == "移动") &&
-            string.Equals(sourcePath, target, StringComparison.OrdinalIgnoreCase))
-        {
-            SetRowError(item, "目标路径与源路径相同，无法执行" + finalAction, "路径错误");
-            continue;
-        }
+    });
 
-        if (hashPending)
+    if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
+        return null;
+    if (!FinalizeLayouts(layouts, generation))
+        return null;
+    return layouts;
+}
+
+private static RowLayout ComputeLayout(Dictionary<string, object> item, LayoutContext context)
+{
+    RowLayout layout = new RowLayout();
+
+    string itemExtension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
+    bool extensionMatched = context.HasFilter &&
+        ExtensionMatchesFilter(itemExtension, context.FilterExtensions);
+    string action = ResolveAction(context.FilterMode, extensionMatched, context.HasFilter, true);
+    bool filterSkip = action == "跳过";
+    layout.FilterSkipped = filterSkip;
+    layout.IsSkipped = filterSkip || GetBool(item, "DateSkipped");
+    layout.Action = action;
+    if (layout.IsSkipped)
+    {
+        layout.Action = "跳过";
+        layout.Status = filterSkip ? "过滤跳过" : "日期跳过";
+        return layout;
+    }
+
+    if (!context.TemplateValid)
+    {
+        SetLayoutError(layout, context.BadToken == null || context.BadToken.Length == 0
+            ? "目标路径模板为空" : "模板包含未知胶囊：" + context.BadToken, "模板错误");
+        return layout;
+    }
+
+    string rootDirectory = context.RootMode == "custom"
+        ? context.CustomRoot : Convert.ToString(item["Dir"], CultureInfo.InvariantCulture);
+    if (context.RootMode == "custom" && context.CustomRootMissing)
+    {
+        SetLayoutError(layout, "根路径为其他文件夹，但尚未选择文件夹", "根路径错误");
+        return layout;
+    }
+    if (rootDirectory == null || rootDirectory.Trim().Length == 0)
+    {
+        SetLayoutError(layout, "无法确定根路径", "根路径错误");
+        return layout;
+    }
+
+    DateTime? effectiveDate = GetDate(item, "EffectiveDate");
+
+    bool hashPending = false;
+    string checksum = "";
+    if (context.NeedsHash)
+    {
+        string path = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
+        bool hashError;
+        string hash = GetCachedHash(path, context.Algorithm, out hashError);
+        if (hashError)
         {
-            item["IsPending"] = true;
-            item["HashPending"] = true;
-            item["Status"] = "校验码计算中";
+            SetLayoutError(layout, "校验码计算失败", "校验码失败");
+            return layout;
+        }
+        if (hash == null)
+        {
+            hashPending = true;
+            checksum = BuildPendingChecksumBadge(context.Algorithm, context.Digits,
+                context.Prefix, context.Suffix);
         }
         else
         {
-            item["Status"] = "就绪";
+            layout.HashHex = hash;
+            checksum = BuildChecksumBadge(context.Algorithm, context.Digits,
+                context.Prefix, context.Suffix, hash);
         }
     }
 
-    // 第二遍：检测批内重复目标。
-    Dictionary<string, List<Dictionary<string, object>>> targetMap =
-        new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.OrdinalIgnoreCase);
-    for (int i = 0; i < _files.Count; i++)
+    string baseName = Convert.ToString(item["BaseName"], CultureInfo.InvariantCulture);
+    string extension = Convert.ToString(item["Ext"], CultureInfo.InvariantCulture);
+    string missingDateText = Convert.ToString(item["MissingDateText"], CultureInfo.InvariantCulture);
+    Dictionary<string, string> values = _layoutValues;
+    if (values == null)
     {
-        Dictionary<string, object> item = _files[i];
-        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
-            continue;
-        string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
-        if (target == null || target.Length == 0)
-            continue;
-        List<Dictionary<string, object>> list;
-        if (!targetMap.TryGetValue(target, out list))
-        {
-            list = new List<Dictionary<string, object>>();
-            targetMap[target] = list;
-        }
-        list.Add(item);
+        values = new Dictionary<string, string>(StringComparer.Ordinal);
+        _layoutValues = values;
     }
-    foreach (KeyValuePair<string, List<Dictionary<string, object>>> pair in targetMap)
+
+    string target;
+    string error;
+    bool ok = TryBuildTargetPath(context.Template, rootDirectory, effectiveDate, missingDateText,
+        baseName, extension, checksum, values, out target, out error);
+    if (!ok)
+    {
+        SetLayoutError(layout, error == null ? "无法生成目标路径" : error, "路径错误");
+        return layout;
+    }
+
+    layout.TargetPath = target;
+
+    string sourcePath = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
+    string sourceDir = Convert.ToString(item["Dir"], CultureInfo.InvariantCulture);
+    string targetDir = "";
+    try
+    {
+        targetDir = Path.GetDirectoryName(target);
+    }
+    catch
+    {
+        targetDir = "";
+    }
+    bool sameDirectory = string.Equals(sourceDir == null ? "" : sourceDir.TrimEnd('\\'),
+        targetDir == null ? "" : targetDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+    string finalAction = ResolveAction(context.FilterMode, extensionMatched,
+        context.HasFilter, sameDirectory);
+    layout.Action = finalAction;
+    if ((finalAction == "复制" || finalAction == "移动") &&
+        string.Equals(sourcePath, target, StringComparison.OrdinalIgnoreCase))
+    {
+        SetLayoutError(layout, "目标路径与源路径相同，无法执行" + finalAction, "路径错误");
+        return layout;
+    }
+
+    if (hashPending)
+    {
+        layout.IsPending = true;
+        layout.HashPending = true;
+        layout.Status = "校验码计算中";
+    }
+    else
+    {
+        layout.Status = "就绪";
+    }
+    return layout;
+}
+
+// 重复目标与目标存在性检查：存在性检查是I/O，按唯一目标并行执行。
+private static bool FinalizeLayouts(RowLayout[] layouts, int generation)
+{
+    Dictionary<string, List<int>> targetMap =
+        new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+    for (int i = 0; i < layouts.Length; i++)
+    {
+        RowLayout layout = layouts[i];
+        if (layout == null || layout.HasError || layout.IsPending || layout.IsSkipped)
+            continue;
+        if (layout.TargetPath == null || layout.TargetPath.Length == 0)
+            continue;
+        List<int> list;
+        if (!targetMap.TryGetValue(layout.TargetPath, out list))
+        {
+            list = new List<int>();
+            targetMap[layout.TargetPath] = list;
+        }
+        list.Add(i);
+    }
+    foreach (KeyValuePair<string, List<int>> pair in targetMap)
     {
         if (pair.Value.Count <= 1)
             continue;
         for (int i = 0; i < pair.Value.Count; i++)
-            SetRowError(pair.Value[i], "目标路径重复：" + pair.Key, "目标重复");
+            SetLayoutError(layouts[pair.Value[i]], "目标路径重复：" + pair.Key, "目标重复");
     }
 
-    // 第三遍：检测目标已存在。
-    for (int i = 0; i < _files.Count; i++)
+    List<int> checkIndices = new List<int>();
+    for (int i = 0; i < layouts.Length; i++)
     {
-        Dictionary<string, object> item = _files[i];
-        if (GetBool(item, "HasError") || GetBool(item, "IsPending") || GetBool(item, "IsSkipped"))
+        RowLayout layout = layouts[i];
+        if (layout == null || layout.HasError || layout.IsPending || layout.IsSkipped)
             continue;
-
-        string source = Convert.ToString(item["SourcePath"], CultureInfo.InvariantCulture);
-        string target = Convert.ToString(item["TargetPath"], CultureInfo.InvariantCulture);
-        if (target == null || target.Length == 0)
+        if (layout.TargetPath == null || layout.TargetPath.Length == 0)
             continue;
-
-        if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
+        string source = Convert.ToString(_files[i]["SourcePath"], CultureInfo.InvariantCulture);
+        if (string.Equals(source, layout.TargetPath, StringComparison.OrdinalIgnoreCase))
         {
-            item["Status"] = "无变化";
+            layout.Status = "无变化";
             continue;
         }
+        checkIndices.Add(i);
+    }
 
+    int cancelled = 0;
+    RunIndexedParallel(checkIndices.Count, SelectIoWorkers(checkIndices.Count), delegate(int slot)
+    {
+        if (Thread.VolatileRead(ref _recomputeGeneration) != generation)
+        {
+            Interlocked.Exchange(ref cancelled, 1);
+            return;
+        }
+        int index = checkIndices[slot];
         try
         {
-            if (File.Exists(target) || Directory.Exists(target))
-                SetRowError(item, "目标文件或目录已存在：" + target, "目标已存在");
+            layouts[index].TargetExists = File.Exists(layouts[index].TargetPath) ||
+                Directory.Exists(layouts[index].TargetPath);
         }
         catch
         {
-            SetRowError(item, "无法检查目标路径是否存在", "路径错误");
+            layouts[index].TargetCheckFailed = true;
         }
-    }
+    });
+    if (cancelled != 0 || Thread.VolatileRead(ref _recomputeGeneration) != generation)
+        return false;
 
+    for (int i = 0; i < checkIndices.Count; i++)
+    {
+        RowLayout layout = layouts[checkIndices[i]];
+        if (layout.TargetCheckFailed)
+            SetLayoutError(layout, "无法检查目标路径是否存在", "路径错误");
+        else if (layout.TargetExists)
+            SetLayoutError(layout, "目标文件或目录已存在：" + layout.TargetPath, "目标已存在");
+    }
+    return true;
+}
+
+private static void ApplyLayouts(RowLayout[] layouts, LayoutContext context)
+{
     for (int i = 0; i < _files.Count; i++)
-        RefreshRowDetails(_files[i]);
+    {
+        Dictionary<string, object> item = _files[i];
+        RowLayout layout = layouts[i];
+        item["TargetPath"] = layout == null || layout.TargetPath == null ? "" : layout.TargetPath;
+        item["Action"] = layout == null || layout.Action == null ? "" : layout.Action;
+        item["Status"] = layout == null || layout.Status == null ? "" : layout.Status;
+        item["Error"] = layout == null || layout.Error == null ? "" : layout.Error;
+        item["HasError"] = layout != null && layout.HasError;
+        item["IsPending"] = layout != null && layout.IsPending;
+        item["HashPending"] = layout != null && layout.HashPending;
+        item["FilterSkipped"] = layout != null && layout.FilterSkipped;
+        item["IsSkipped"] = layout != null && layout.IsSkipped;
+        item["HashHex"] = layout == null ? null : layout.HashHex;
+        item["ExecState"] = "";
+        item["ExecDetails"] = "";
+        RefreshRowDetails(item);
+    }
 
     _grid.Items.Refresh();
     UpdateStatus();
-    RefreshErrorBanner(templateValid ? null :
-        (badToken == null || badToken.Length == 0
-            ? "目标路径模板为空" : "模板包含未知胶囊：" + badToken));
+    RefreshErrorBanner(context.TemplateValid ? null :
+        (context.BadToken == null || context.BadToken.Length == 0
+            ? "目标路径模板为空" : "模板包含未知胶囊：" + context.BadToken));
 
     int statusPending = CountPendingRows();
     if (statusPending == 0)
         _progress.Visibility = Visibility.Collapsed;
 
-    if (needsHash && templateValid)
+    if (context.NeedsHash && context.TemplateValid)
         EnsureHashWorker();
     else
     {
         _hashTotal = 0;
         _hashDone = 0;
         _progress.Visibility = Visibility.Collapsed;
+    }
+}
+
+private static void SetLayoutError(RowLayout layout, string message, string status)
+{
+    layout.HasError = true;
+    layout.IsPending = false;
+    layout.Error = message;
+    layout.Status = status;
+}
+
+private static int SelectComputeWorkers(int count)
+{
+    if (count < 64)
+        return 1;
+    int workers = Environment.ProcessorCount;
+    if (workers < 2) workers = 2;
+    if (workers > 8) workers = 8;
+    return workers > count ? count : workers;
+}
+
+private static int SelectIoWorkers(int count)
+{
+    if (count < 16)
+        return 1;
+    int workers = Math.Max(4, Environment.ProcessorCount);
+    if (workers > ScanMaxWorkers) workers = ScanMaxWorkers;
+    return workers > count ? count : workers;
+}
+
+// 调度器：用原子计数分发索引，每个索引只执行一次；线程只写自己的结果槽位。
+private static void RunIndexedParallel(int count, int workerCount, Action<int> body)
+{
+    if (count <= 0)
+        return;
+    if (workerCount > count)
+        workerCount = count;
+    if (workerCount <= 1 || count < 32)
+    {
+        for (int i = 0; i < count; i++)
+            body(i);
+        return;
+    }
+
+    int next = -1;
+    using (CountdownEvent done = new CountdownEvent(workerCount))
+    {
+        WaitCallback worker = delegate(object state)
+        {
+            try
+            {
+                while (true)
+                {
+                    int index = Interlocked.Increment(ref next);
+                    if (index >= count)
+                        break;
+                    try
+                    {
+                        body(index);
+                    }
+                    catch
+                    {
+                        // 单个索引异常不能中断该线程继续领取任务。
+                    }
+                }
+            }
+            finally
+            {
+                done.Signal();
+            }
+        };
+        for (int i = 0; i < workerCount; i++)
+            ThreadPool.QueueUserWorkItem(worker);
+        done.Wait();
     }
 }
 
@@ -4345,6 +4690,8 @@ private static string BuildDetails(Dictionary<string, object> item)
         "（" + Convert.ToString(item["Size"], CultureInfo.InvariantCulture) + " 字节）");
     builder.AppendLine("创建日期：" + FormatDate(item["Created"]));
     builder.AppendLine("修改日期：" + FormatDate(item["Modified"]));
+    if (GetBool(item, "CloudOnly"))
+        builder.AppendLine("本地状态：云端占位（未读取EXIF内容，避免触发下载）");
     builder.AppendLine("EXIF拍摄日期：" + FormatDate(item["ExifDate"]));
     builder.AppendLine("文件名中的日期：" + FormatDate(item["FileNameDate"]));
     builder.AppendLine("生效日期：" + FormatDate(item["EffectiveDate"]) +
@@ -4650,7 +4997,7 @@ private static void RefreshPreviewNow()
     AbsorbConfigFromUi(oldAlgorithm, oldDigits);
 
     _previewDirty = false;
-    RefreshDates(true, true);
+    RefreshDates(true, true, true);
 }
 
 private static void LoadPreset_Click(object sender, RoutedEventArgs e)
@@ -4725,7 +5072,7 @@ private static void LoadPresetByName(string name)
         return;
     }
     _previewDirty = false;
-    RefreshDates(true, true);
+    RefreshDates(true, true, true);
     _statusText.Text = "已载入预设：" + actualName;
 }
 
@@ -6266,6 +6613,7 @@ private static void Window_Closed(object sender, EventArgs e)
 
     _scanGeneration++;
     _hashGeneration++;
+    Interlocked.Increment(ref _recomputeGeneration);
     _hashStop = true;
     _hashRunning = false;
     _hashAlgorithm = "";

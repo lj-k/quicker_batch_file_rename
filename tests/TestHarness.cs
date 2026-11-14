@@ -979,6 +979,21 @@ public static class TestHarness
             try { Directory.Delete(dir, true); } catch { }
         }
 
+        // 云端占位属性识别：命中任一云属性即视为内容不在本地。
+        Check(CoreUnderTest.IsCloudPlaceholderAttributes(CoreUnderTest.FileAttributeOffline),
+            "corner: offline attribute is cloud placeholder");
+        Check(CoreUnderTest.IsCloudPlaceholderAttributes(CoreUnderTest.FileAttributeRecallOnDataAccess),
+            "corner: recall-on-data-access is cloud placeholder");
+        Check(CoreUnderTest.IsCloudPlaceholderAttributes(CoreUnderTest.FileAttributeRecallOnOpen),
+            "corner: recall-on-open is cloud placeholder");
+        Check(CoreUnderTest.IsCloudPlaceholderAttributes(
+            CoreUnderTest.FileAttributeOffline | 0x20),
+            "corner: offline combined with archive");
+        Check(!CoreUnderTest.IsCloudPlaceholderAttributes(0x20),
+            "corner: archive is not cloud placeholder");
+        Check(!CoreUnderTest.IsCloudPlaceholderAttributes(0),
+            "corner: normal file is not cloud placeholder");
+
         // 同卷判断：盘符大小写不敏感，不同盘符不同卷。
         Check(CoreUnderTest.IsSameVolumePath(@"C:\a\1.txt", @"c:\b\2.txt"),
             "corner: same drive case-insensitive");

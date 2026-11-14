@@ -11,7 +11,7 @@ using System.Threading;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.8
+// 版本：0.06.9
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -482,6 +482,18 @@ public static string DescribeTransferProfile(string path, long fileSize)
 {
     DriveType drive = GetDriveTypeSafe(path);
     return drive.ToString().ToLowerInvariant() + ":" + SelectCopyBufferSize(path, fileSize).ToString(CultureInfo.InvariantCulture);
+}
+
+// Windows 云筛选器占位属性：内容不在本地，打开文件会触发下载。
+public const int FileAttributeOffline = 0x00001000;
+public const int FileAttributeRecallOnOpen = 0x00040000;
+public const int FileAttributeRecallOnDataAccess = 0x00400000;
+
+public static bool IsCloudPlaceholderAttributes(int fileAttributes)
+{
+    return (fileAttributes & FileAttributeOffline) != 0 ||
+        (fileAttributes & FileAttributeRecallOnOpen) != 0 ||
+        (fileAttributes & FileAttributeRecallOnDataAccess) != 0;
 }
 
 public static bool IsSameVolumePath(string source, string target)
