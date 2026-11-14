@@ -28,7 +28,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.17
+// 版本：0.06.18
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -79,6 +79,12 @@ private static Button _applyButton;
 private static Button _finishButton;
 private static Button _previewButton;
 private static CheckBox _realTimeCheck;
+private static CheckBox _realTimeSelectionCheck;
+private static DispatcherTimer _selectionDebounceTimer;
+private static DispatcherTimer _selectionFallbackTimer;
+private static string _lastSelectionKey = "";
+private static IntPtr _selectionHook = IntPtr.Zero;
+private static WinEventDelegate _selectionHookDelegate;
 private static TextBox _filterExtensionsText;
 private static ComboBox _filterModeCombo;
 private static Button _loadExtPresetButton;
@@ -109,6 +115,28 @@ private static List<string> _paths = new List<string>();
 private static HashSet<string> _pathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 private static Dictionary<string, string> _config = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 private static Dictionary<string, string> _hashCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+    int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+[DllImport("user32.dll")]
+private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax,
+    IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, uint idProcess,
+    uint idThread, uint dwFlags);
+
+[DllImport("user32.dll")]
+private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+[DllImport("user32.dll")]
+private static extern IntPtr GetForegroundWindow();
+
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+private const uint EventObjectSelection = 0x8006;
+private const uint EventObjectSelectionRemove = 0x8008;
+private const uint WineventOutofcontext = 0x0000;
+private const uint WineventSkipownprocess = 0x0002;
 
 private static readonly object _hashLock = new object();
 private static readonly Regex EditorTokenRegex = new Regex("【[^】]*】", RegexOptions.Compiled);
@@ -286,6 +314,7 @@ public static void OnWindowLoaded(Window win, IDictionary<string, object> dataCo
     ApplyGridFilter();
 
     CollectInputPaths();
+    _lastSelectionKey = BuildSelectionKey(_paths);
     if (_paths.Count == 0)
     {
         _statusText.Text = "没有可处理的文件" + DescribeSkipped();
@@ -334,6 +363,7 @@ private static void FindControls(Window win)
     _finishButton = (Button)win.FindName("BtnFinish");
     _previewButton = (Button)win.FindName("BtnPreview");
     _realTimeCheck = (CheckBox)win.FindName("RealTimeCheck");
+    _realTimeSelectionCheck = (CheckBox)win.FindName("RealTimeSelectionCheck");
     _filterExtensionsText = (TextBox)win.FindName("FilterExtensionsText");
     _filterModeCombo = (ComboBox)win.FindName("FilterModeCombo");
     _loadExtPresetButton = (Button)win.FindName("BtnLoadExtPreset");
@@ -389,6 +419,8 @@ private static void ResetRuntimeState()
     UpdatePerfText();
     _templateHashCheckKey = null;
     _templateHashCheckValue = false;
+    _lastSelectionKey = "";
+    RemoveSelectionHook();
     _columnFilters.Clear();
     _activeHeaderFilterKey = "";
     if (_headerFilterPopup != null)
@@ -464,6 +496,11 @@ private static void AttachEvents(Window win)
     _algorithmCombo.SelectionChanged += AlgorithmCombo_SelectionChanged;
     _realTimeCheck.Checked += RealTimeCheck_Changed;
     _realTimeCheck.Unchecked += RealTimeCheck_Changed;
+    if (_realTimeSelectionCheck != null)
+    {
+        _realTimeSelectionCheck.Checked += RealTimeSelectionCheck_Changed;
+        _realTimeSelectionCheck.Unchecked += RealTimeSelectionCheck_Changed;
+    }
     _filterExtensionsText.TextChanged += FilterExtensions_TextChanged;
     _filterModeCombo.SelectionChanged += FilterMode_SelectionChanged;
     if (_execParallelCombo != null)
@@ -570,6 +607,7 @@ private static void AttachToolTips()
     SetTipByName("ChecksumCardTitle", "校验码：算法、位数、前后缀。\n位数取高位；默认前缀[、后缀]；模板不含【校验码】时不计算哈希。\n大文件/BLAKE3计算需要时间。");
     SetTipByName("TemplateCardTitle", "目标路径模板：使用右侧胶囊组合新路径和文件名。\n默认包含日期层级和aaa/bbb；输出统一Windows反斜杠。\n两个合并开关可压缩模板产生的重复文件夹层级，不修改根路径本身。\n非法字符、保留设备名、超长路径或重名会在顶部报错。");
     SetTip(_realTimeCheck, "实时刷新开关。\n开启：配置变更后立即重算目标路径（文本输入约250ms防抖）。\n关闭：配置变更只更新配置/日期数据，目标路径保持旧值；需点击【预览】刷新，预览过期时【生成输出】禁用。");
+    SetTip(_realTimeSelectionCheck, "实时获取：开启后监听文件资源管理器选中项变化，自动替换当前输入。\n只有资源管理器为前台窗口时才触发；本窗口或其他程序为前台时不刷新。\n选中变化停止约0.35秒后读取一次，避免频繁扫描；执行文件操作期间不触发。\n由系统选中事件触发，另带1.5秒低频兜底检查（仅钩子安装失败时启用）。");
     SetTip(_previewButton, "按当前配置重新计算目标路径，并启动必要的校验码计算。\n用于实时刷新关闭后的手动刷新，也可主动重新预览。");
     SetTipByName("BtnRefreshSelection", "重新读取当前文件资源管理器窗口中选中的文件，并用该列表替换当前输入。\n只读取已存在的文件；未选中任何文件时会提示。\n扫描中点击会取消当前扫描并重新读取；执行文件操作期间不可使用。");
     SetTip(_loadPresetButton, "点击后在下方弹出预设下拉列表。\n选择某个预设会载入其全部配置并刷新预览。\n每项右侧的🖊用于重命名该预设，❌用于删除该预设；删除不可撤销。\n若词典是旧版单预设，会显示为“默认”。");
@@ -3140,7 +3178,7 @@ private static void RefreshSelection_Click(object sender, RoutedEventArgs e)
         return;
     }
 
-    ReplaceInputSelection(selected);
+    ReplaceInputSelection(selected, false);
 }
 
 // 读取资源管理器窗口的选中项；仅保留仍存在的文件，忽略文件夹与虚拟项。
@@ -3280,7 +3318,7 @@ private static void ReleaseComObject(object value)
 }
 
 // 用新的选择替换当前输入：取消旧扫描/哈希，清空行与路径，再按新列表重新扫描。
-private static void ReplaceInputSelection(List<string> selected)
+private static void ReplaceInputSelection(List<string> selected, bool silent)
 {
     _scanGeneration++;
     _hashGeneration++;
@@ -3315,6 +3353,7 @@ private static void ReplaceInputSelection(List<string> selected)
 
     for (int i = 0; i < selected.Count; i++)
         AddInputPath(selected[i]);
+    _lastSelectionKey = BuildSelectionKey(_paths);
 
     if (_data != null)
     {
@@ -3343,13 +3382,191 @@ private static void ReplaceInputSelection(List<string> selected)
 
     if (_paths.Count == 0)
     {
-        MessageBox.Show("没有可处理的文件。", "重新获取选择的文件",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (!silent)
+        {
+            MessageBox.Show("没有可处理的文件。", "重新获取选择的文件",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
         return;
     }
 
     StartScan();
     _statusText.Text = "已重新获取 " + _paths.Count + " 个文件，正在读取属性…";
+}
+
+private static bool IsRealTimeSelectionEnabled()
+{
+    return _realTimeSelectionCheck != null && _realTimeSelectionCheck.IsChecked == true;
+}
+
+private static void RealTimeSelectionCheck_Changed(object sender, RoutedEventArgs e)
+{
+    if (_suppressEvents)
+        return;
+    if (IsRealTimeSelectionEnabled())
+    {
+        _lastSelectionKey = BuildSelectionKey(_paths);
+        InstallSelectionHook();
+    }
+    else
+    {
+        RemoveSelectionHook();
+    }
+}
+
+// 全局选中事件钩子：仅监听选择类事件，且只在资源管理器为前台时进入防抖。
+private static void InstallSelectionHook()
+{
+    if (_selectionHook != IntPtr.Zero)
+        return;
+    try
+    {
+        if (_selectionHookDelegate == null)
+            _selectionHookDelegate = SelectionEventCallback;
+        _selectionHook = SetWinEventHook(EventObjectSelection, EventObjectSelectionRemove,
+            IntPtr.Zero, _selectionHookDelegate, 0, 0,
+            WineventOutofcontext | WineventSkipownprocess);
+    }
+    catch
+    {
+        _selectionHook = IntPtr.Zero;
+    }
+
+    if (_selectionHook == IntPtr.Zero)
+        StartSelectionFallbackTimer();
+    else
+        StopSelectionFallbackTimer();
+}
+
+private static void RemoveSelectionHook()
+{
+    if (_selectionHook != IntPtr.Zero)
+    {
+        try { UnhookWinEvent(_selectionHook); }
+        catch { }
+        _selectionHook = IntPtr.Zero;
+    }
+    if (_selectionDebounceTimer != null)
+        _selectionDebounceTimer.Stop();
+    StopSelectionFallbackTimer();
+}
+
+private static void SelectionEventCallback(IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+    int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
+{
+    // 回调可能来自系统事件线程：这里只读非WPF字段，具体开关状态在UI线程再判断。
+    if (_selectionHook == IntPtr.Zero || _window == null || _executing)
+        return;
+    if (!IsExplorerForeground())
+        return;
+    ScheduleRealTimeSelectionRefresh();
+}
+
+private static void ScheduleRealTimeSelectionRefresh()
+{
+    if (_window == null)
+        return;
+    try
+    {
+        _window.Dispatcher.BeginInvoke(new Action(delegate()
+        {
+            if (!IsRealTimeSelectionEnabled() || _executing || _window == null)
+                return;
+            if (_selectionDebounceTimer == null)
+            {
+                _selectionDebounceTimer = new DispatcherTimer();
+                _selectionDebounceTimer.Interval = TimeSpan.FromMilliseconds(350);
+                _selectionDebounceTimer.Tick += delegate(object sender, EventArgs e)
+                {
+                    if (_selectionDebounceTimer != null)
+                        _selectionDebounceTimer.Stop();
+                    ApplyRealTimeSelection();
+                };
+            }
+            _selectionDebounceTimer.Stop();
+            _selectionDebounceTimer.Start();
+        }));
+    }
+    catch
+    {
+        // 窗口已关闭或Dispatcher已停止时忽略。
+    }
+}
+
+private static void ApplyRealTimeSelection()
+{
+    if (!IsRealTimeSelectionEnabled() || _executing || _window == null)
+        return;
+    // 本窗口为焦点时不刷新，避免用户在本窗口操作时列表突然变化。
+    if (_window.IsActive)
+        return;
+    if (!IsExplorerForeground())
+        return;
+
+    List<string> selected = GetExplorerSelectedPaths();
+    if (selected.Count == 0)
+        return;
+    string key = BuildSelectionKey(selected);
+    if (key == _lastSelectionKey)
+        return;
+    _lastSelectionKey = key;
+    ReplaceInputSelection(selected, true);
+}
+
+private static void StartSelectionFallbackTimer()
+{
+    if (_window == null)
+        return;
+    if (_selectionFallbackTimer == null)
+    {
+        _selectionFallbackTimer = new DispatcherTimer();
+        _selectionFallbackTimer.Interval = TimeSpan.FromMilliseconds(1500);
+        _selectionFallbackTimer.Tick += delegate(object sender, EventArgs e)
+        {
+            ApplyRealTimeSelection();
+        };
+    }
+    _selectionFallbackTimer.Start();
+}
+
+private static void StopSelectionFallbackTimer()
+{
+    if (_selectionFallbackTimer != null)
+        _selectionFallbackTimer.Stop();
+}
+
+private static bool IsExplorerForeground()
+{
+    return IsExplorerWindow(GetForegroundWindow());
+}
+
+private static bool IsExplorerWindow(IntPtr hwnd)
+{
+    if (hwnd == IntPtr.Zero)
+        return false;
+    StringBuilder className = new StringBuilder(64);
+    if (GetClassName(hwnd, className, className.Capacity) <= 0)
+        return false;
+    string name = className.ToString();
+    return string.Equals(name, "CabinetWClass", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(name, "ExploreWClass", StringComparison.OrdinalIgnoreCase);
+}
+
+private static string BuildSelectionKey(List<string> paths)
+{
+    if (paths == null || paths.Count == 0)
+        return "";
+    List<string> sorted = new List<string>(paths);
+    sorted.Sort(StringComparer.OrdinalIgnoreCase);
+    StringBuilder builder = new StringBuilder();
+    for (int i = 0; i < sorted.Count; i++)
+    {
+        if (sorted[i] == null)
+            continue;
+        builder.Append(sorted[i].ToLowerInvariant());
+        builder.Append('\n');
+    }
+    return builder.ToString();
 }
 
 private static void RefreshPreviewNow()
@@ -5205,6 +5422,7 @@ private static void Window_Closed(object sender, EventArgs e)
     _hashAlgorithm = "";
     _execStop = true;
     _executing = false;
+    RemoveSelectionHook();
     StopExecutionTimer();
     if (_debounceTimer != null)
     {
@@ -5252,6 +5470,10 @@ private static void Window_Closed(object sender, EventArgs e)
     _finishButton = null;
     _previewButton = null;
     _realTimeCheck = null;
+    _realTimeSelectionCheck = null;
+    _selectionDebounceTimer = null;
+    _selectionFallbackTimer = null;
+    _lastSelectionKey = "";
     _filterExtensionsText = null;
     _filterModeCombo = null;
     _loadExtPresetButton = null;

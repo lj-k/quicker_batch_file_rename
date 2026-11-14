@@ -1,4 +1,4 @@
-<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.17 -->
+<!-- 批量重命名器 自定义窗口 XAML 版本：0.06.18 -->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -239,6 +239,11 @@
             </StackPanel>
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <CheckBox x:Name="RealTimeSelectionCheck"
+                          Content="实时获取"
+                          IsChecked="False"
+                          VerticalAlignment="Center"
+                          Margin="0,0,8,0"/>
                 <Button x:Name="BtnRefreshSelection"
                         Content="重新获取选择的文件"
                         Style="{StaticResource ToolButton}"
@@ -782,7 +787,7 @@
                                Margin="4,2,4,6"/>
                     <ListBox x:Name="PresetListBox"
                              Width="280"
-                             MaxHeight="240"
+                             MaxHeight="430"
                              BorderThickness="0"
                              Background="#FFFFFF">
                         <ListBox.ItemContainerStyle>
