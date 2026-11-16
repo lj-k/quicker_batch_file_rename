@@ -8,10 +8,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 // ============================================================================
 // 批量重命名器核心逻辑（Quicker 辅助 C# 代码片段）
-// 版本：0.06.20
+// 版本：0.06.21
 // 说明：本文件不包含 namespace / class 声明，部署时会与 CustomWindow.Aux.cs
 //       合并后放入 Quicker【自定义窗口】的【辅助C#代码】中。
 // 兼容性：按 C# 5.0 / .NET Framework 4.x 语法编写。
@@ -50,40 +51,21 @@ private static readonly uint[] Blake3Iv = new uint[] {
     0x510E527FU, 0x9B05688CU, 0x1F83D9ABU, 0x5BE0CD19U
 };
 
-private static readonly int[] Blake3Permutation = new int[] {
-    2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
-};
-
 private const uint Blake3ChunkStart = 1U;
 private const uint Blake3ChunkEnd = 2U;
 private const uint Blake3Parent = 4U;
 private const uint Blake3Root = 8U;
 
-// BLAKE3 压缩使用线程内复用的临时缓冲区，避免每个 64 字节块分配数组。
-[ThreadStatic] private static uint[] _blake3State;
-[ThreadStatic] private static uint[] _blake3Message;
-[ThreadStatic] private static uint[] _blake3Permuted;
+// BLAKE3 压缩与分块使用线程内复用缓冲区，避免每个块/分块分配数组。
 [ThreadStatic] private static uint[] _blake3Block;
 [ThreadStatic] private static uint[] _blake3LastBlock;
 [ThreadStatic] private static uint[] _blake3Cv;
 [ThreadStatic] private static uint[] _blake3Output;
 [ThreadStatic] private static byte[] _blake3Chunk;
 [ThreadStatic] private static byte[] _blake3ReadBuffer;
-
-private static void EnsureBlake3Scratch()
-{
-    if (_blake3State != null)
-        return;
-    _blake3State = new uint[16];
-    _blake3Message = new uint[16];
-    _blake3Permuted = new uint[16];
-    _blake3Block = new uint[16];
-    _blake3LastBlock = new uint[16];
-    _blake3Cv = new uint[8];
-    _blake3Output = new uint[16];
-    _blake3Chunk = new byte[1024];
-    _blake3ReadBuffer = new byte[81920];
-}
+[ThreadStatic] private static uint[] _blake3Stack;
+[ThreadStatic] private static uint[] _blake3CvBatch;
+[ThreadStatic] private static byte[] _blake3HashBytes;
 
 private static uint[] _crc32Table = null;
 private static readonly object _crc32TableLock = new object();
@@ -1414,27 +1396,46 @@ private static string ComposeChecksumBadge(string algorithm, int digits, string 
 public static string ComputeHashHex(string filePath, string algorithm, out string error)
 {
     error = null;
+    try
+    {
+        using (FileStream stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            return ComputeHashHexFromStream(stream, algorithm, out error);
+        }
+    }
+    catch (Exception ex)
+    {
+        error = ex.Message;
+        return null;
+    }
+}
+
+public static string ComputeHashHexFromStream(Stream stream, string algorithm, out string error)
+{
+    error = null;
     string value = NormalizeAlgorithm(algorithm);
     if (!IsSupportedAlgorithm(value))
     {
         error = "不支持的校验算法：" + (algorithm == null ? "" : algorithm);
         return null;
     }
+    if (stream == null)
+    {
+        error = "哈希输入流为空";
+        return null;
+    }
 
     try
     {
-        using (FileStream stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-        {
-            if (value == "CRC32")
-                return ComputeCrc32Hex(stream);
-            if (value == "BLAKE3")
-                return ComputeBlake3Hex(stream);
+        if (value == "CRC32")
+            return ComputeCrc32Hex(stream);
+        if (value == "BLAKE3")
+            return ComputeBlake3Hex(stream);
 
-            using (HashAlgorithm hashAlgorithm = value == "MD5" ? (HashAlgorithm)MD5.Create() : (HashAlgorithm)SHA256.Create())
-            {
-                byte[] hash = hashAlgorithm.ComputeHash(stream);
-                return ToHex(hash);
-            }
+        using (HashAlgorithm hashAlgorithm = value == "MD5" ? (HashAlgorithm)MD5.Create() : (HashAlgorithm)SHA256.Create())
+        {
+            byte[] hash = hashAlgorithm.ComputeHash(stream);
+            return ToHex(hash);
         }
     }
     catch (Exception ex)
@@ -1447,34 +1448,10 @@ public static string ComputeHashHex(string filePath, string algorithm, out strin
 public static string ComputeHashHexFromBytes(byte[] data, string algorithm, out string error)
 {
     error = null;
-    try
+    using (MemoryStream stream = new MemoryStream(data == null ? new byte[0] : data))
     {
-        using (MemoryStream stream = new MemoryStream(data == null ? new byte[0] : data))
-        {
-            string value = NormalizeAlgorithm(algorithm);
-            if (value == "CRC32")
-                return ComputeCrc32Hex(stream);
-            if (value == "BLAKE3")
-                return ComputeBlake3Hex(stream);
-            if (value == "MD5")
-            {
-                using (MD5 md5 = MD5.Create())
-                    return ToHex(md5.ComputeHash(stream));
-            }
-            if (value == "SHA-256")
-            {
-                using (SHA256 sha = SHA256.Create())
-                    return ToHex(sha.ComputeHash(stream));
-            }
-        }
+        return ComputeHashHexFromStream(stream, algorithm, out error);
     }
-    catch (Exception ex)
-    {
-        error = ex.Message;
-        return null;
-    }
-    error = "不支持的校验算法";
-    return null;
 }
 
 private static string ComputeCrc32Hex(Stream stream)
@@ -1534,99 +1511,340 @@ private static string ToHex(byte[] data)
 
 // ---------------------------------------------------------------------------
 // BLAKE3（默认 32 字节输出，无密钥模式）
+// 说明：.NET Framework 4.8 的托管代码无法直接发射 AVX512 指令，这里用
+// IsProcessorFeaturePresent 检测 AVX/AVX2/AVX512F，并按检测结果选择分块并
+// 行度与读缓冲大小；压缩核心使用局部变量展开，避免数组状态与逐轮置换开销。
 // ---------------------------------------------------------------------------
+
+private static readonly object Blake3ProfileLock = new object();
+private static volatile int _blake3ProfileReady = 0;
+private static int _blake3InstructionLevel = 0;
+private static int _blake3Parallelism = 1;
+private static int _blake3ReadBufferSize = 128 * 1024;
+
+private const uint ProcessorFeatureAvxInstructions = 39;
+private const uint ProcessorFeatureAvx2Instructions = 40;
+private const uint ProcessorFeatureAvx512FInstructions = 41;
+
+[DllImport("kernel32.dll")]
+private static extern bool IsProcessorFeaturePresent(uint processorFeature);
+
+// 检测结果只用于调度与缓冲策略；压缩核心仍是可移植的托管实现。
+private static void EnsureBlake3Profile()
+{
+    if (_blake3ProfileReady != 0)
+        return;
+    lock (Blake3ProfileLock)
+    {
+        if (_blake3ProfileReady != 0)
+            return;
+
+        int level = 0;
+        try
+        {
+            if (IsProcessorFeaturePresent(ProcessorFeatureAvx512FInstructions))
+                level = 3;
+            else if (IsProcessorFeaturePresent(ProcessorFeatureAvx2Instructions))
+                level = 2;
+            else if (IsProcessorFeaturePresent(ProcessorFeatureAvxInstructions))
+                level = 1;
+        }
+        catch
+        {
+            level = 0;
+        }
+
+        int cores = Environment.ProcessorCount;
+        if (cores < 1)
+            cores = 1;
+        int parallelism = 1;
+        int bufferSize = 128 * 1024;
+        if (level >= 3)
+        {
+            parallelism = Math.Min(8, cores);
+            bufferSize = 1024 * 1024;
+        }
+        else if (level == 2)
+        {
+            parallelism = Math.Min(6, cores);
+            bufferSize = 512 * 1024;
+        }
+        else if (level == 1)
+        {
+            parallelism = Math.Min(4, cores);
+            bufferSize = 256 * 1024;
+        }
+        if (parallelism < 2)
+            parallelism = 1;
+
+        _blake3InstructionLevel = level;
+        _blake3Parallelism = parallelism;
+        _blake3ReadBufferSize = bufferSize;
+        _blake3ProfileReady = 1;
+    }
+}
+
+public static string GetBlake3AccelerationSummary()
+{
+    EnsureBlake3Profile();
+    string levelText;
+    if (_blake3InstructionLevel >= 3)
+        levelText = "AVX512F调度";
+    else if (_blake3InstructionLevel == 2)
+        levelText = "AVX2调度";
+    else if (_blake3InstructionLevel == 1)
+        levelText = "AVX调度";
+    else
+        levelText = "标量调度";
+    return levelText + "，" + _blake3Parallelism.ToString(CultureInfo.InvariantCulture) +
+        "路分块并行，" + (_blake3ReadBufferSize / 1024).ToString(CultureInfo.InvariantCulture) +
+        " KB缓冲";
+}
+
+private static void EnsureBlake3Scratch()
+{
+    if (_blake3Block != null)
+        return;
+    _blake3Block = new uint[16];
+    _blake3LastBlock = new uint[16];
+    _blake3Cv = new uint[8];
+    _blake3Output = new uint[8];
+    _blake3Chunk = new byte[1024];
+    _blake3HashBytes = new byte[32];
+    _blake3Stack = new uint[64 * 8];
+}
+
+private static int ReadFull(Stream stream, byte[] buffer, int offset, int count)
+{
+    int total = 0;
+    while (total < count)
+    {
+        int read = stream.Read(buffer, offset + total, count - total);
+        if (read <= 0)
+            break;
+        total += read;
+    }
+    return total;
+}
 
 private static string ComputeBlake3Hex(Stream stream)
 {
+    EnsureBlake3Profile();
     EnsureBlake3Scratch();
-    byte[] chunk = _blake3Chunk;
-    int chunkLength = 0;
-    ulong chunkCounter = 0;
-    List<uint[]> stack = new List<uint[]>();
-    byte[] readBuffer = _blake3ReadBuffer;
-    int read;
 
-    while ((read = stream.Read(readBuffer, 0, readBuffer.Length)) > 0)
+    int bufferSize = _blake3ReadBufferSize;
+    byte[] buffer = _blake3ReadBuffer;
+    if (buffer == null || buffer.Length < bufferSize)
     {
-        int position = 0;
-        while (position < read)
+        buffer = new byte[bufferSize];
+        _blake3ReadBuffer = buffer;
+    }
+
+    byte[] carry = _blake3Chunk;
+    int carryLength = 0;
+    bool carryFull = false;
+    uint[] stack = _blake3Stack;
+    int stackDepth = 0;
+    ulong chunkCounter = 0;
+
+    while (true)
+    {
+        int read = ReadFull(stream, buffer, 0, buffer.Length);
+        bool eof = read < buffer.Length;
+        int offset = 0;
+
+        if (carryFull)
         {
-            if (chunkLength == 1024)
+            if (read == 0)
+                break;
+            ProcessChunkRange(carry, 0, 1, chunkCounter, stack, ref stackDepth);
+            chunkCounter++;
+            carryFull = false;
+            carryLength = 0;
+        }
+
+        if (carryLength > 0)
+        {
+            int need = 1024 - carryLength;
+            int take = Math.Min(need, read);
+            if (take > 0)
             {
-                uint[] chunkCv = Blake3ChunkCv(chunk, 1024, chunkCounter);
-                chunkCounter++;
-                Blake3AddChunkCv(stack, chunkCv, chunkCounter);
-                chunkLength = 0;
+                Array.Copy(buffer, 0, carry, carryLength, take);
+                carryLength += take;
+                offset += take;
+            }
+            if (carryLength == 1024)
+            {
+                if (offset < read)
+                {
+                    ProcessChunkRange(carry, 0, 1, chunkCounter, stack, ref stackDepth);
+                    chunkCounter++;
+                    carryLength = 0;
+                }
+                else if (!eof)
+                {
+                    carryFull = true;
+                    continue;
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        if (carryFull)
+            continue;
+
+        int remaining = read - offset;
+        if (remaining > 0)
+        {
+            int fullChunks = remaining / 1024;
+            int tail = remaining - fullChunks * 1024;
+            if (eof)
+            {
+                if (tail > 0)
+                {
+                    ProcessChunkRange(buffer, offset, fullChunks, chunkCounter, stack, ref stackDepth);
+                    chunkCounter += (ulong)fullChunks;
+                    offset += fullChunks * 1024;
+                    Array.Copy(buffer, offset, carry, 0, tail);
+                    carryLength = tail;
+                    carryFull = false;
+                }
+                else
+                {
+                    int nonFinal = fullChunks - 1;
+                    if (nonFinal > 0)
+                    {
+                        ProcessChunkRange(buffer, offset, nonFinal, chunkCounter, stack, ref stackDepth);
+                        chunkCounter += (ulong)nonFinal;
+                        offset += nonFinal * 1024;
+                    }
+                    Array.Copy(buffer, offset, carry, 0, 1024);
+                    carryLength = 1024;
+                    carryFull = true;
+                }
+                break;
             }
 
-            int copy = Math.Min(1024 - chunkLength, read - position);
-            Array.Copy(readBuffer, position, chunk, chunkLength, copy);
-            chunkLength += copy;
-            position += copy;
+            if (tail > 0)
+            {
+                ProcessChunkRange(buffer, offset, fullChunks, chunkCounter, stack, ref stackDepth);
+                chunkCounter += (ulong)fullChunks;
+                offset += fullChunks * 1024;
+                Array.Copy(buffer, offset, carry, 0, tail);
+                carryLength = tail;
+                carryFull = false;
+            }
+            else if (fullChunks > 0)
+            {
+                int nonFinal = fullChunks - 1;
+                if (nonFinal > 0)
+                {
+                    ProcessChunkRange(buffer, offset, nonFinal, chunkCounter, stack, ref stackDepth);
+                    chunkCounter += (ulong)nonFinal;
+                    offset += nonFinal * 1024;
+                }
+                Array.Copy(buffer, offset, carry, 0, 1024);
+                carryLength = 1024;
+                carryFull = true;
+            }
+        }
+        else if (eof)
+        {
+            break;
         }
     }
 
+    int finalLength = carryFull ? 1024 : carryLength;
+    return FinalizeBlake3(carry, 0, finalLength, chunkCounter, stack, stackDepth);
+}
+
+private static string FinalizeBlake3(byte[] data, int offset, int length,
+    ulong chunkCounter, uint[] stack, int stackDepth)
+{
     uint[] inputCv;
     uint[] lastBlock;
     uint lastBlockLength;
     uint lastFlags;
-    Blake3ChunkOutput(chunk, chunkLength, chunkCounter, out inputCv, out lastBlock,
+    Blake3ChunkOutput(data, offset, length, chunkCounter, out inputCv, out lastBlock,
         out lastBlockLength, out lastFlags);
 
-    uint[] compressed = _blake3Output;
+    uint[] output = _blake3Output;
+    uint[] block = _blake3Block;
     ulong outputCounter = chunkCounter;
-    while (stack.Count > 0)
+    while (stackDepth > 0)
     {
-        Blake3Compress(inputCv, lastBlock, outputCounter, lastBlockLength, lastFlags, compressed);
-        uint[] rightCv = new uint[8];
-        Array.Copy(compressed, rightCv, 8);
-
-        uint[] leftCv = stack[stack.Count - 1];
-        stack.RemoveAt(stack.Count - 1);
-
-        uint[] parentBlock = new uint[16];
-        Array.Copy(leftCv, 0, parentBlock, 0, 8);
-        Array.Copy(rightCv, 0, parentBlock, 8, 8);
-
+        Blake3Compress(inputCv, lastBlock, outputCounter, lastBlockLength, lastFlags, output);
+        stackDepth--;
+        int leftOffset = stackDepth * 8;
+        for (int i = 0; i < 8; i++)
+        {
+            block[i] = stack[leftOffset + i];
+            block[i + 8] = output[i];
+        }
         inputCv = Blake3Iv;
-        lastBlock = parentBlock;
+        lastBlock = block;
         lastBlockLength = 64;
         lastFlags = Blake3Parent;
         outputCounter = 0;
     }
 
-    Blake3Compress(inputCv, lastBlock, 0, lastBlockLength, lastFlags | Blake3Root, compressed);
-    byte[] output = new byte[32];
+    Blake3Compress(inputCv, lastBlock, 0, lastBlockLength, lastFlags | Blake3Root, output);
+    byte[] hash = _blake3HashBytes;
     for (int i = 0; i < 8; i++)
     {
-        uint word = compressed[i];
-        output[i * 4] = (byte)(word & 0xFFU);
-        output[i * 4 + 1] = (byte)((word >> 8) & 0xFFU);
-        output[i * 4 + 2] = (byte)((word >> 16) & 0xFFU);
-        output[i * 4 + 3] = (byte)((word >> 24) & 0xFFU);
+        uint word = output[i];
+        hash[i * 4] = (byte)(word & 0xFFU);
+        hash[i * 4 + 1] = (byte)((word >> 8) & 0xFFU);
+        hash[i * 4 + 2] = (byte)((word >> 16) & 0xFFU);
+        hash[i * 4 + 3] = (byte)((word >> 24) & 0xFFU);
     }
-    return ToHex(output);
+    return ToHex(hash);
 }
 
-private static uint[] Blake3ChunkCv(byte[] chunk, int length, ulong chunkCounter)
+private static void ProcessChunkRange(byte[] data, int offset, int chunkCount,
+    ulong baseCounter, uint[] stack, ref int stackDepth)
 {
-    uint[] cv;
-    uint[] lastBlock;
-    uint lastBlockLength;
-    uint lastFlags;
-    Blake3ChunkOutput(chunk, length, chunkCounter, out cv, out lastBlock,
-        out lastBlockLength, out lastFlags);
+    if (chunkCount <= 0)
+        return;
+    if (_blake3Parallelism > 1 && chunkCount >= 64)
+    {
+        int cvWords = chunkCount * 8;
+        uint[] cvs = _blake3CvBatch;
+        if (cvs == null || cvs.Length < cvWords)
+        {
+            cvs = new uint[cvWords];
+            _blake3CvBatch = cvs;
+        }
+        ParallelOptions options = new ParallelOptions();
+        options.MaxDegreeOfParallelism = _blake3Parallelism;
+        Parallel.For(0, chunkCount, options, delegate(int i)
+        {
+            Blake3ChunkCvTo(data, offset + i * 1024, 1024,
+                baseCounter + (ulong)i, cvs, i * 8);
+        });
+        for (int i = 0; i < chunkCount; i++)
+        {
+            Blake3AddChunkCvToStack(cvs, i * 8, baseCounter + (ulong)i + 1UL,
+                stack, ref stackDepth);
+        }
+        return;
+    }
 
-    uint[] compressed = _blake3Output;
-    Blake3Compress(cv, lastBlock, chunkCounter, lastBlockLength, lastFlags, compressed);
-
-    uint[] result = new uint[8];
-    Array.Copy(compressed, result, 8);
-    return result;
+    for (int i = 0; i < chunkCount; i++)
+    {
+        Blake3ChunkCvTo(data, offset + i * 1024, 1024,
+            baseCounter + (ulong)i, _blake3Output, 0);
+        Blake3AddChunkCvToStack(_blake3Output, 0, baseCounter + (ulong)i + 1UL,
+            stack, ref stackDepth);
+    }
 }
 
-private static void Blake3ChunkOutput(byte[] chunk, int length, ulong chunkCounter,
-    out uint[] inputCv, out uint[] lastBlock, out uint lastBlockLength, out uint lastFlags)
+// 计算一个完整/最终分块的 CV；输出为 8 个 32 位字。
+private static void Blake3ChunkCvTo(byte[] data, int offset, int length,
+    ulong chunkCounter, uint[] output, int outputOffset)
 {
     EnsureBlake3Scratch();
     uint[] cv = _blake3Cv;
@@ -1634,136 +1852,681 @@ private static void Blake3ChunkOutput(byte[] chunk, int length, ulong chunkCount
         cv[i] = Blake3Iv[i];
 
     uint[] block = _blake3Block;
-    uint[] compressed = _blake3Output;
     int blockCount = length <= 0 ? 1 : (length + 63) / 64;
-    int offset = 0;
-
+    int blockOffset = 0;
     for (int blockIndex = 0; blockIndex < blockCount; blockIndex++)
     {
-        int remaining = length - offset;
+        int remaining = length - blockOffset;
         if (remaining > 64) remaining = 64;
         if (remaining < 0) remaining = 0;
 
-        for (int i = 0; i < 16; i++)
-            block[i] = 0;
-        for (int i = 0; i < remaining; i++)
-            block[i / 4] |= (uint)chunk[offset + i] << ((i % 4) * 8);
-
-        uint blockFlags = (offset == 0 ? Blake3ChunkStart : 0U);
-        bool isLast = (blockIndex == blockCount - 1);
-        if (isLast)
+        LoadBlock(data, offset + blockOffset, remaining, block);
+        uint blockFlags = (blockIndex == 0 ? Blake3ChunkStart : 0U);
+        if (blockIndex == blockCount - 1)
         {
             blockFlags |= Blake3ChunkEnd;
-            Array.Copy(block, _blake3LastBlock, 16);
+            Blake3CompressAt(cv, 0, block, chunkCounter, (uint)remaining,
+                blockFlags, output, outputOffset);
+            return;
+        }
+
+        Blake3Compress(cv, block, chunkCounter, (uint)remaining,
+            blockFlags, _blake3Output);
+        for (int i = 0; i < 8; i++)
+            cv[i] = _blake3Output[i];
+        blockOffset += remaining;
+    }
+}
+
+// 返回最终分块的输入 CV 与最后一个未压缩块，供根节点压缩使用。
+private static void Blake3ChunkOutput(byte[] data, int offset, int length,
+    ulong chunkCounter, out uint[] inputCv, out uint[] lastBlock,
+    out uint lastBlockLength, out uint lastFlags)
+{
+    EnsureBlake3Scratch();
+    uint[] cv = _blake3Cv;
+    for (int i = 0; i < 8; i++)
+        cv[i] = Blake3Iv[i];
+
+    uint[] block = _blake3Block;
+    uint[] last = _blake3LastBlock;
+    int blockCount = length <= 0 ? 1 : (length + 63) / 64;
+    int blockOffset = 0;
+    for (int blockIndex = 0; blockIndex < blockCount; blockIndex++)
+    {
+        int remaining = length - blockOffset;
+        if (remaining > 64) remaining = 64;
+        if (remaining < 0) remaining = 0;
+
+        LoadBlock(data, offset + blockOffset, remaining, block);
+        uint blockFlags = (blockIndex == 0 ? Blake3ChunkStart : 0U);
+        if (blockIndex == blockCount - 1)
+        {
+            blockFlags |= Blake3ChunkEnd;
+            Array.Copy(block, last, 16);
             inputCv = cv;
-            lastBlock = _blake3LastBlock;
+            lastBlock = last;
             lastBlockLength = (uint)remaining;
             lastFlags = blockFlags;
             return;
         }
 
-        Blake3Compress(cv, block, chunkCounter, (uint)remaining, blockFlags, compressed);
+        Blake3Compress(cv, block, chunkCounter, (uint)remaining,
+            blockFlags, _blake3Output);
         for (int i = 0; i < 8; i++)
-            cv[i] = compressed[i];
-        offset += remaining;
+            cv[i] = _blake3Output[i];
+        blockOffset += remaining;
     }
 
     inputCv = cv;
-    lastBlock = _blake3LastBlock;
+    lastBlock = last;
     lastBlockLength = 0;
     lastFlags = Blake3ChunkStart | Blake3ChunkEnd;
 }
 
-private static void Blake3AddChunkCv(List<uint[]> stack, uint[] cv, ulong totalChunks)
+private static void Blake3AddChunkCvToStack(uint[] cv, int cvOffset,
+    ulong totalChunks, uint[] stack, ref int stackDepth)
 {
     while ((totalChunks & 1UL) == 0UL)
     {
-        uint[] left = stack[stack.Count - 1];
-        stack.RemoveAt(stack.Count - 1);
-        Blake3ParentCv(left, cv, left);
-        cv = left;
+        stackDepth--;
+        int leftOffset = stackDepth * 8;
+        Blake3ParentCvAt(stack, leftOffset, cv, cvOffset, stack, leftOffset);
+        cv = stack;
+        cvOffset = leftOffset;
         totalChunks >>= 1;
     }
-    stack.Add(cv);
+    Array.Copy(cv, cvOffset, stack, stackDepth * 8, 8);
+    stackDepth++;
 }
 
-private static void Blake3ParentCv(uint[] left, uint[] right, uint[] destination)
+private static void Blake3ParentCvAt(uint[] leftCv, int leftOffset,
+    uint[] rightCv, int rightOffset, uint[] destination, int destinationOffset)
 {
     EnsureBlake3Scratch();
     uint[] block = _blake3Block;
     for (int i = 0; i < 8; i++)
     {
-        block[i] = left[i];
-        block[i + 8] = right[i];
+        block[i] = leftCv[leftOffset + i];
+        block[i + 8] = rightCv[rightOffset + i];
     }
-
-    Blake3Compress(Blake3Iv, block, 0, 64, Blake3Parent, _blake3Output);
-    for (int i = 0; i < 8; i++)
-        destination[i] = _blake3Output[i];
+    Blake3CompressAt(Blake3Iv, 0, block, 0, 64, Blake3Parent,
+        destination, destinationOffset);
 }
 
-private static void Blake3Compress(uint[] cv, uint[] block, ulong counter,
+private static void Blake3Compress(uint[] cv, uint[] message, ulong counter,
     uint blockLength, uint flags, uint[] output)
 {
-    EnsureBlake3Scratch();
-    uint[] state = _blake3State;
-    uint[] message = _blake3Message;
-    uint[] permuted = _blake3Permuted;
-
-    for (int i = 0; i < 8; i++)
-        state[i] = cv[i];
-    state[8] = Blake3Iv[0];
-    state[9] = Blake3Iv[1];
-    state[10] = Blake3Iv[2];
-    state[11] = Blake3Iv[3];
-    state[12] = (uint)(counter & 0xFFFFFFFFUL);
-    state[13] = (uint)(counter >> 32);
-    state[14] = blockLength;
-    state[15] = flags;
-
-    Array.Copy(block, message, 16);
-
-    for (int round = 0; round < 7; round++)
-    {
-        Blake3G(state, 0, 4, 8, 12, message[0], message[1]);
-        Blake3G(state, 1, 5, 9, 13, message[2], message[3]);
-        Blake3G(state, 2, 6, 10, 14, message[4], message[5]);
-        Blake3G(state, 3, 7, 11, 15, message[6], message[7]);
-        Blake3G(state, 0, 5, 10, 15, message[8], message[9]);
-        Blake3G(state, 1, 6, 11, 12, message[10], message[11]);
-        Blake3G(state, 2, 7, 8, 13, message[12], message[13]);
-        Blake3G(state, 3, 4, 9, 14, message[14], message[15]);
-
-        if (round != 6)
-        {
-            for (int i = 0; i < 16; i++)
-                permuted[i] = message[Blake3Permutation[i]];
-            Array.Copy(permuted, message, 16);
-        }
-    }
-
-    for (int i = 0; i < 8; i++)
-    {
-        output[i] = state[i] ^ state[i + 8];
-        output[i + 8] = state[i + 8] ^ cv[i];
-    }
+    Blake3CompressAt(cv, 0, message, counter, blockLength, flags, output, 0);
 }
 
-private static void Blake3G(uint[] state, int a, int b, int c, int d, uint mx, uint my)
+private static void LoadBlock(byte[] data, int offset, int length, uint[] block)
 {
-    state[a] = state[a] + state[b] + mx;
-    state[d] = RotateRight(state[d] ^ state[a], 16);
-    state[c] = state[c] + state[d];
-    state[b] = RotateRight(state[b] ^ state[c], 12);
-    state[a] = state[a] + state[b] + my;
-    state[d] = RotateRight(state[d] ^ state[a], 8);
-    state[c] = state[c] + state[d];
-    state[b] = RotateRight(state[b] ^ state[c], 7);
+    int fullWords = length / 4;
+    for (int i = 0; i < fullWords; i++)
+        block[i] = Load32(data, offset + i * 4);
+    if (fullWords >= 16)
+        return;
+
+    uint tail = 0;
+    int tailOffset = fullWords * 4;
+    int tailCount = length - tailOffset;
+    for (int i = 0; i < tailCount; i++)
+        tail |= (uint)data[offset + tailOffset + i] << (i * 8);
+    block[fullWords] = tail;
+    for (int i = fullWords + 1; i < 16; i++)
+        block[i] = 0;
 }
 
-private static uint RotateRight(uint value, int count)
+private static uint Load32(byte[] data, int offset)
 {
-    return (value >> count) | (value << (32 - count));
+    if (BitConverter.IsLittleEndian)
+        return BitConverter.ToUInt32(data, offset);
+    return (uint)data[offset] |
+        ((uint)data[offset + 1] << 8) |
+        ((uint)data[offset + 2] << 16) |
+        ((uint)data[offset + 3] << 24);
+}
+
+private static void Blake3CompressAt(uint[] cv, int cvOffset, uint[] message,
+    ulong counter, uint blockLength, uint flags, uint[] output, int outputOffset)
+{
+    uint s0 = cv[cvOffset + 0];
+    uint s1 = cv[cvOffset + 1];
+    uint s2 = cv[cvOffset + 2];
+    uint s3 = cv[cvOffset + 3];
+    uint s4 = cv[cvOffset + 4];
+    uint s5 = cv[cvOffset + 5];
+    uint s6 = cv[cvOffset + 6];
+    uint s7 = cv[cvOffset + 7];
+    uint s8 = Blake3Iv[0];
+    uint s9 = Blake3Iv[1];
+    uint s10 = Blake3Iv[2];
+    uint s11 = Blake3Iv[3];
+    uint s12 = (uint)(counter & 0xFFFFFFFFUL);
+    uint s13 = (uint)(counter >> 32);
+    uint s14 = blockLength;
+    uint s15 = flags;
+
+    // 第 1 轮
+    s0 = s0 + s4 + message[0];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[1];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[2];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[3];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[4];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[5];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[6];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[7];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[8];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[9];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[10];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[11];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[12];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[13];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[14];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[15];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 2 轮
+    s0 = s0 + s4 + message[2];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[6];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[3];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[10];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[7];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[0];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[4];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[13];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[1];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[11];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[12];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[5];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[9];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[14];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[15];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[8];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 3 轮
+    s0 = s0 + s4 + message[3];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[4];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[10];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[12];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[13];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[2];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[7];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[14];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[6];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[5];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[9];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[0];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[11];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[15];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[8];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[1];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 4 轮
+    s0 = s0 + s4 + message[10];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[7];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[12];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[9];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[14];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[3];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[13];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[15];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[4];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[0];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[11];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[2];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[5];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[8];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[1];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[6];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 5 轮
+    s0 = s0 + s4 + message[12];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[13];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[9];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[11];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[15];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[10];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[14];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[8];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[7];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[2];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[5];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[3];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[0];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[1];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[6];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[4];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 6 轮
+    s0 = s0 + s4 + message[9];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[14];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[11];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[5];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[8];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[12];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[15];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[1];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[13];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[3];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[0];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[10];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[2];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[6];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[4];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[7];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    // 第 7 轮
+    s0 = s0 + s4 + message[11];
+    s12 = (s12 ^ s0); s12 = (s12 >> 16) | (s12 << 16);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 12) | (s4 << 20);
+    s0 = s0 + s4 + message[15];
+    s12 = (s12 ^ s0); s12 = (s12 >> 8) | (s12 << 24);
+    s8 = s8 + s12;
+    s4 = (s4 ^ s8); s4 = (s4 >> 7) | (s4 << 25);
+
+    s1 = s1 + s5 + message[5];
+    s13 = (s13 ^ s1); s13 = (s13 >> 16) | (s13 << 16);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 12) | (s5 << 20);
+    s1 = s1 + s5 + message[0];
+    s13 = (s13 ^ s1); s13 = (s13 >> 8) | (s13 << 24);
+    s9 = s9 + s13;
+    s5 = (s5 ^ s9); s5 = (s5 >> 7) | (s5 << 25);
+
+    s2 = s2 + s6 + message[1];
+    s14 = (s14 ^ s2); s14 = (s14 >> 16) | (s14 << 16);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 12) | (s6 << 20);
+    s2 = s2 + s6 + message[9];
+    s14 = (s14 ^ s2); s14 = (s14 >> 8) | (s14 << 24);
+    s10 = s10 + s14;
+    s6 = (s6 ^ s10); s6 = (s6 >> 7) | (s6 << 25);
+
+    s3 = s3 + s7 + message[8];
+    s15 = (s15 ^ s3); s15 = (s15 >> 16) | (s15 << 16);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 12) | (s7 << 20);
+    s3 = s3 + s7 + message[6];
+    s15 = (s15 ^ s3); s15 = (s15 >> 8) | (s15 << 24);
+    s11 = s11 + s15;
+    s7 = (s7 ^ s11); s7 = (s7 >> 7) | (s7 << 25);
+
+    s0 = s0 + s5 + message[14];
+    s15 = (s15 ^ s0); s15 = (s15 >> 16) | (s15 << 16);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 12) | (s5 << 20);
+    s0 = s0 + s5 + message[10];
+    s15 = (s15 ^ s0); s15 = (s15 >> 8) | (s15 << 24);
+    s10 = s10 + s15;
+    s5 = (s5 ^ s10); s5 = (s5 >> 7) | (s5 << 25);
+
+    s1 = s1 + s6 + message[2];
+    s12 = (s12 ^ s1); s12 = (s12 >> 16) | (s12 << 16);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 12) | (s6 << 20);
+    s1 = s1 + s6 + message[12];
+    s12 = (s12 ^ s1); s12 = (s12 >> 8) | (s12 << 24);
+    s11 = s11 + s12;
+    s6 = (s6 ^ s11); s6 = (s6 >> 7) | (s6 << 25);
+
+    s2 = s2 + s7 + message[3];
+    s13 = (s13 ^ s2); s13 = (s13 >> 16) | (s13 << 16);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 12) | (s7 << 20);
+    s2 = s2 + s7 + message[4];
+    s13 = (s13 ^ s2); s13 = (s13 >> 8) | (s13 << 24);
+    s8 = s8 + s13;
+    s7 = (s7 ^ s8); s7 = (s7 >> 7) | (s7 << 25);
+
+    s3 = s3 + s4 + message[7];
+    s14 = (s14 ^ s3); s14 = (s14 >> 16) | (s14 << 16);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 12) | (s4 << 20);
+    s3 = s3 + s4 + message[13];
+    s14 = (s14 ^ s3); s14 = (s14 >> 8) | (s14 << 24);
+    s9 = s9 + s14;
+    s4 = (s4 ^ s9); s4 = (s4 >> 7) | (s4 << 25);
+
+    output[outputOffset + 0] = s0 ^ s8;
+    output[outputOffset + 1] = s1 ^ s9;
+    output[outputOffset + 2] = s2 ^ s10;
+    output[outputOffset + 3] = s3 ^ s11;
+    output[outputOffset + 4] = s4 ^ s12;
+    output[outputOffset + 5] = s5 ^ s13;
+    output[outputOffset + 6] = s6 ^ s14;
+    output[outputOffset + 7] = s7 ^ s15;
 }
 
 // ---------------------------------------------------------------------------

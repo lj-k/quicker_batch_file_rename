@@ -28,7 +28,7 @@ using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
 
 // ============================================================================
 // 批量重命名器界面逻辑（Quicker 自定义窗口辅助 C# 代码）
-// 版本：0.06.20
+// 版本：0.06.21
 // 部署时与 RenamerCore.cs 合并，放入【辅助C#代码】。
 // 兼容 C# 5.0；三个 Quicker 回调：OnWindowCreated / OnWindowLoaded /
 // OnButtonClicked。按钮事件在 OnWindowLoaded 中通过 Click 注册。
@@ -1308,8 +1308,11 @@ private static void UpdateChecksumBadge()
         GetConfigInt(_config, "checksumDigits", 8), _config["checksumPrefix"],
         _config["checksumSuffix"], sample);
     _checksumBadge.Text = badge;
-    SetTip(_checksumBadge, "当前校验码格式预览。\n完整格式：" + badge +
-        "\n位数小于算法最高值时显示“算法_位数”；截取取高位；前后缀直接包裹算法标识与校验码。");
+    string tip = "当前校验码格式预览。\n完整格式：" + badge +
+        "\n位数小于算法最高值时显示“算法_位数”；截取取高位；前后缀直接包裹算法标识与校验码。";
+    if (NormalizeAlgorithm(_config["checksumAlgorithm"]) == "BLAKE3")
+        tip += "\nBLAKE3加速：" + GetBlake3AccelerationSummary() + "。";
+    SetTip(_checksumBadge, tip);
 }
 
 private static string MakeSampleHex(int length)

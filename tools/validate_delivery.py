@@ -163,7 +163,7 @@ check("ComputeBlake3Hex" in dist_code, "deployed code contains BLAKE3")
 check("namespace " not in dist_code, "deployed code has no namespace declaration")
 check("public class " not in dist_code, "deployed code has no class declaration")
 check("public static class " not in dist_code, "deployed code has no static class declaration")
-check(dist_text.splitlines()[1] == "// 版本：0.06.20", "deployed code version is 0.06.20")
+check(dist_text.splitlines()[1] == "// 版本：0.06.21", "deployed code version is 0.06.21")
 check("extensionPresets" in dist_text, "deployed code maps extension preset variable")
 check("SetVarValue" in dist_text, "deployed code attempts realtime variable write")
 check("GetVarValue" in dist_text, "deployed code attempts startup variable read")
@@ -191,9 +191,23 @@ check("VerifyMovedFileName" in dist_text, "deployed code skips content hash for 
 check("EnsureExecutionDirectory" in dist_text, "deployed code caches execution directories")
 check("TemplateNeedsHash" in dist_text, "deployed code caches template checksum detection")
 check("BitmapCacheOption.None" in dist_text, "deployed code reads EXIF metadata only")
+check("IsProcessorFeaturePresent" in dist_text and
+      "ProcessorFeatureAvx512FInstructions" in dist_text and
+      "GetBlake3AccelerationSummary" in dist_text,
+      "BLAKE3 detects AVX/AVX2/AVX512F and reports the scheduling profile")
+check("Blake3CompressAt" in dist_text and "_blake3Stack" in dist_text and
+      "Blake3ParentCvAt" in dist_text,
+      "BLAKE3 uses an unrolled compression core and flat CV stack")
+check("ComputeHashHexFromStream" in dist_text and "ReadFull" in dist_text,
+      "BLAKE3 hashes streams with zero-copy chunking and short-read handling")
+check("Parallel.For" in dist_text and "_blake3Parallelism" in dist_text and
+      "_blake3CvBatch" in dist_text,
+      "BLAKE3 parallelizes chunk CV computation by detected profile")
+check("Blake3Permutation" not in dist_text and "_blake3State" not in dist_text,
+      "legacy array-state BLAKE3 core is removed")
 
 core_text = (ROOT / "src" / "RenamerCore.cs").read_text(encoding="utf-8")
-check("// 版本：0.06.20" in core_text, "core source version is 0.06.20")
+check("// 版本：0.06.21" in core_text, "core source version is 0.06.21")
 check('preset["presetVersion"] = "0.05"' in core_text, "preset schema version is 0.05")
 check("preferExifOnFilenameConflict" in core_text, "core contains exif conflict config")
 check("BuildFlatPresetDictionary" in core_text, "core contains flat preset builder")
@@ -224,8 +238,8 @@ check("BuildPerfLine" in aux_text, "aux reports scan and layout performance")
 check("ClassifyPerformanceBottleneck" in core_text, "core classifies CPU/IO bottleneck")
 check("UpdatePerfText" in aux_text and "PerfText" in xaml_text,
       "aux wires performance text into the footer")
-check('// 版本：0.06.20' in aux_text, "aux source version is 0.06.20")
-check("XAML 版本：0.06.20" in xaml_text, "XAML version is 0.06.20")
+check('// 版本：0.06.21' in aux_text, "aux source version is 0.06.21")
+check("XAML 版本：0.06.21" in xaml_text, "XAML version is 0.06.21")
 
 # Using directives must be at the top of the deployment snippet.
 first_non_using = None
@@ -248,8 +262,8 @@ if first_non_using is not None:
     check(not bad_using, "no using directives after the code body")
 
 req_text = (ROOT / "doc" / "需求文档.md").read_text(encoding="utf-8")
-check("> 版本：0.0.32" in req_text and "> 版本：0.0.10" not in req_text,
-      "requirements doc header version is 0.0.32")
+check("> 版本：0.0.33" in req_text and "> 版本：0.0.10" not in req_text,
+      "requirements doc header version is 0.0.33")
 check("2020.06/aaa/bbb" in req_text, "requirements example includes the 2020.06 level")
 check("文件传输性能与RAS" in req_text, "requirements includes transfer performance and RAS")
 check("双交付方案与完成按钮" in req_text, "requirements includes dual delivery and finish button")
@@ -260,8 +274,8 @@ check("交互窗口与执行性能优化" in req_text, "requirements includes pe
 check("性能优化实施记录" in req_text, "requirements includes performance implementation record")
 
 for name, version in [
-    ("doc/开发说明.md", "0.06.20"),
-    ("doc/测试报告.md", "0.06.20"),
+    ("doc/开发说明.md", "0.06.21"),
+    ("doc/测试报告.md", "0.06.21"),
 ]:
     path = ROOT / name
     if path.exists():
@@ -273,13 +287,13 @@ for name, version in [
 changelog = ROOT / "CHANGELOG.md"
 if changelog.exists():
     changelog_text = changelog.read_text(encoding="utf-8")
-    check("[0.06.20]" in changelog_text, "CHANGELOG has 0.06.20 entry")
+    check("[0.06.21]" in changelog_text, "CHANGELOG has 0.06.21 entry")
 else:
     errors.append("FAIL missing CHANGELOG.md")
 
 test_report_text = (ROOT / "doc" / "测试报告.md").read_text(encoding="utf-8")
 check("六团队性能会诊记录" in test_report_text, "test report has six-team performance review")
-check("430 项通过" in test_report_text, "test report records 430 passing tests")
+check("490 项通过" in test_report_text, "test report records 490 passing tests")
 check("第一性原理评审" in test_report_text, "test report has first-principles review record")
 
 agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -298,8 +312,8 @@ s3 = release / "方案3-重复获取+重命名+执行"
 for folder in [s1, s2, s3]:
     check((folder / "CustomWindow.xaml").exists(), str(folder.name) + " has XAML")
     check((folder / "QuickerAux.cs").exists(), str(folder.name) + " has Aux")
-    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.20",
-          str(folder.name) + " Aux version 0.06.20")
+    check((folder / "QuickerAux.cs").read_text(encoding="utf-8").splitlines()[1] == "// 版本：0.06.21",
+          str(folder.name) + " Aux version 0.06.21")
 
 s1_xaml = (s1 / "CustomWindow.xaml").read_text(encoding="utf-8")
 s2_xaml = (s2 / "CustomWindow.xaml").read_text(encoding="utf-8")

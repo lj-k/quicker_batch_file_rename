@@ -79,6 +79,112 @@ public static class TestHarness
             string actual = CoreUnderTest.ComputeHashHexFromBytes(MakePattern(length), "BLAKE3", out error);
             CheckEqual(expected, actual, "BLAKE3 official vector len=" + length);
         }
+        string acceleration = CoreUnderTest.GetBlake3AccelerationSummary();
+        Check(acceleration != null && acceleration.Length > 0 && acceleration.Contains("路"),
+            "BLAKE3 acceleration summary");
+    }
+
+    private sealed class ShortReadStream : Stream
+    {
+        private readonly byte[] _data;
+        private readonly int _step;
+        private int _position;
+
+        public ShortReadStream(byte[] data, int step)
+        {
+            _data = data;
+            _step = step;
+        }
+
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { throw new NotSupportedException(); } }
+        public override long Position
+        {
+            get { throw new NotSupportedException(); }
+            set { throw new NotSupportedException(); }
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_position >= _data.Length)
+                return 0;
+            int available = _data.Length - _position;
+            int take = Math.Min(Math.Min(count, _step), available);
+            Array.Copy(_data, _position, buffer, offset, take);
+            _position += take;
+            return take;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+    }
+
+    // 短读流：覆盖BLAKE3跨读缓冲的分块残留与最终分块延迟判定。
+    private static void TestBlake3ShortReads()
+    {
+        int[] sizes = new int[] {
+            0, 1, 1023, 1024, 1025, 2048, 81920, 81921, 131071, 131072, 131073
+        };
+        int[] steps = new int[] { 1, 7, 333 };
+        for (int s = 0; s < sizes.Length; s++)
+        {
+            byte[] data = MakePattern(sizes[s]);
+            string error;
+            string expected = CoreUnderTest.ComputeHashHexFromBytes(data, "BLAKE3", out error);
+            for (int t = 0; t < steps.Length; t++)
+            {
+                string actual = CoreUnderTest.ComputeHashHexFromStream(
+                    new ShortReadStream(data, steps[t]), "BLAKE3", out error);
+                CheckEqual(expected, actual,
+                    "BLAKE3 short-read len=" + sizes[s] + " step=" + steps[t]);
+            }
+        }
+    }
+
+    // 强制并行配置，验证分块并行路径与官方大向量一致。
+    private static void TestBlake3ParallelProfile()
+    {
+        Type type = typeof(CoreUnderTest);
+        System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+        type.GetField("_blake3InstructionLevel", flags).SetValue(null, 3);
+        type.GetField("_blake3Parallelism", flags).SetValue(null, 4);
+        type.GetField("_blake3ReadBufferSize", flags).SetValue(null, 256 * 1024);
+        type.GetField("_blake3ProfileReady", flags).SetValue(null, 1);
+
+        string[] lines = File.ReadAllLines("tests/blake3_vectors.txt", Encoding.UTF8);
+        int tested = 0;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0) continue;
+            string[] parts = line.Split('|');
+            int length = int.Parse(parts[0], CultureInfo.InvariantCulture);
+            if (length < 65536)
+                continue;
+            string error;
+            string actual = CoreUnderTest.ComputeHashHexFromBytes(
+                MakePattern(length), "BLAKE3", out error);
+            CheckEqual(parts[1], actual, "BLAKE3 parallel vector len=" + length);
+            tested++;
+        }
+        Check(tested >= 6, "BLAKE3 parallel profile covers large vectors");
     }
 
     // 文件流哈希：覆盖读缓冲区与 BLAKE3 分块边界。
@@ -1112,6 +1218,8 @@ public static class TestHarness
         Console.OutputEncoding = Encoding.UTF8;
         TestStandardHashes();
         TestBlake3();
+        TestBlake3ParallelProfile();
+        TestBlake3ShortReads();
         TestHashStreamBoundaries();
         TestFilenameDate();
         TestChecksumBadge();
