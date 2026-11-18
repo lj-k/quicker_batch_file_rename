@@ -29,6 +29,15 @@
 - 新增重点风险：统一会话令牌缺失、`ReplaceInputSelection`导致`ApplyLayouts`越界、哈希缓存旧代际晚写与重新获取后不失效、扫描/哈希/执行线程启动失败卡死、嵌套并行无全局预算、UI线程同步布局冻结。
 - 需求文档升至0.0.35并新增第33章；开发说明需求版本同步0.0.35；代码版本维持0.06.21，未修改代码。
 
+### Planning - 2026-11-18
+
+- 新增《线程安全修复方案》0.01：架构/前端/后端/性能/并发/开发/测试七团队按评审报告出具修复与措施方案。
+- P0五项：`WindowSession`/`ExecutionSession`隔离、`FileSnapshot`/`LayoutRequest`与`DataVersion`、`LayoutSession`计数与超时、`ComScope`逐个释放、哈希缓存身份/代际/失效。
+- P1八项：线程启动失败、`RunIndexedParallel`超时/异常、幂等`ShutdownSession`、UI线程异步化、全局并发预算、`FileShare.Delete`与一致性、Process/Dialog/Popup释放、选择读取STA消息泵。
+- P2七项：volatile、缓存LRU、单实例、BLAKE3缓冲、Shell/选择/CRC32/Process优化、分批UI刷新、网络主机限流。
+- 开发拆分为PR-01至PR-10，每PR独立可回滚；P0建议0.06.22，P1建议0.06.23，P2建议0.06.24；P0完成前不发布长期驻留稳定版。
+- 需求文档升至0.0.36并新增第34章；开发说明新增10.8并同步需求版本0.0.36；代码版本维持0.06.21，未修改代码。
+
 ## [0.06.20] - 2026-11-14
 
 ### Changed
